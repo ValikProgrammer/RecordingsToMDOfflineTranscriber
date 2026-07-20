@@ -1,0 +1,24 @@
+input_folder = "./audio"
+out_folder   = "./out"
+systems_folder = "./systems"
+logs_folder  = "./logs"
+asr_model    = "large-v3"      # large-v3 | large-v3-turbo (see --turbo)
+llm_model    = "qwen2.5:14b"
+llm_ctx      = 8192            # if the transcript is longer, map-reduce the summary
+diarize_device = "mps"         # mps | cpu
+mono_threshold = 0.92          # dominant speaker's share of speech time above which it's treated as a monologue
+jobs = 3                       # workers for CPU stages (ffmpeg/summary/render); the GPU stage is always 1
+obsidian_frontmatter = true    # add a YAML frontmatter (properties) block to the top of the .md
+wikilink_speakers = false      # render named speakers as [[Name]] (Obsidian graph/backlinks)
+
+# --- Adaptive summary length (GUIDANCE, not a hard rule) ---
+# The model picks the actual length by number of substantive topics; the range below is just a duration-based hint.
+[summary]
+# Use the FIRST tier where duration_min <= up_to_min; if longer than all tiers, use the last one.
+tiers = [
+  { up_to_min = 15,     sentences = "3–5"   },
+  { up_to_min = 45,     sentences = "5–8"   },
+  { up_to_min = 90,     sentences = "8–12"  },
+  { up_to_min = 100000, sentences = "10–15" },   # "and longer" (large number = no practical upper bound)
+]
+long_form_from_min = 45   # from this duration on, add "Key Topics" and "Decisions" sections

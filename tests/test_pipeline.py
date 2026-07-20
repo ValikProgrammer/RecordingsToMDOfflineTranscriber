@@ -1,0 +1,289 @@
+import json
+import threading
+import time
+from pathlib import Path
+
+import pytest
+
+from transcriber.config import Config
+from transcriber.manifest import Manifest
+from transcriber.models import AsrResult, AsrSegment, AsrWord, DiarResult, DiarSegment, FileTask, RawDoc
+from transcriber.naming import default_title_for_date, is_technical_name
+from transcriber.pipeline import Pipeline, RunOptions, atomic_write_json, filter_tasks, resolve_title_and_date
+
+
+class _FakeNumpyScalar:
+    """Mimics a numpy scalar: not JSON-serializable, but exposes .item()."""
+
+    def __init__(self, value):
+        self._value = value
+
+    def item(self):
+        return self._value
+
+
+def test_atomic_write_json_coerces_numpy_like_scalars(tmp_path):
+    path = tmp_path / "raw.json"
+    atomic_write_json(path, {"is_monologue": _FakeNumpyScalar(True), "start": _FakeNumpyScalar(1.5)})
+    data = json.loads(path.read_text())
+    assert data == {"is_monologue": True, "start": 1.5}
+
+
+def test_atomic_write_json_coerces_real_numpy_types(tmp_path):
+    np = pytest.importorskip("numpy")
+    path = tmp_path / "raw.json"
+    atomic_write_json(
+        path,
+        {"is_monologue": np.bool_(True), "start": np.float64(1.5), "embedding": np.array([0.1, 0.2])},
+    )
+    data = json.loads(path.read_text())
+    assert data["is_monologue"] is True
+    assert data["start"] == 1.5
+    assert data["embedding"] == [pytest.approx(0.1), pytest.approx(0.2)]
+
+
+def test_atomic_write_json_still_rejects_truly_unserializable(tmp_path):
+    with pytest.raises(TypeError):
+        atomic_write_json(tmp_path / "raw.json", {"bad": object()})
+
+
+def _task(name="team call.m4a", content_hash="blake2b:aaa", status="to_do", path=None) -> FileTask:
+    return FileTask(path=path or Path(f"/audio/{name}"), content_hash=content_hash, source_name=name, status=status, reason="")
+
+
+# --- filter_tasks -------------------------------------------------------
+
+def test_filter_tasks_drops_skip_status():
+    tasks = [_task(status="to_do"), _task(content_hash="blake2b:bbb", status="skip")]
+    result = filter_tasks(tasks, only=None, skip=None)
+    assert [t.status for t in result] == ["to_do"]
+
+
+def test_filter_tasks_only_matches_stem_or_name():
+    tasks = [_task(name="a.m4a", content_hash="blake2b:a"), _task(name="b.m4a", content_hash="blake2b:b")]
+    result = filter_tasks(tasks, only="a", skip=None)
+    assert [t.source_name for t in result] == ["a.m4a"]
+
+
+def test_filter_tasks_skip_excludes_by_name():
+    tasks = [_task(name="a.m4a", content_hash="blake2b:a"), _task(name="b.m4a", content_hash="blake2b:b")]
+    result = filter_tasks(tasks, only=None, skip=["a.m4a"])
+    assert [t.source_name for t in result] == ["b.m4a"]
+
+
+# --- resolve_title_and_date ----------------------------------------------
+
+def test_resolve_title_meaningful_name_ignores_llm_title(tmp_path):
+    path = tmp_path / "team call.m4a"
+    path.write_bytes(b"x")
+    doc = RawDoc(
+        schema=1, content_hash="h", source_name=path.name, source_path=str(path),
+        language="ru", duration_sec=1.0, num_speakers=1, is_monologue=True,
+        asr=None, created_at="", summary=None,
+    )
+    title, day = resolve_title_and_date(path.name, path, doc)
+    assert title == "Team call"
+
+
+def test_resolve_title_technical_name_uses_llm_title(tmp_path):
+    from transcriber.models import AsrInfo, Summary
+
+    path = tmp_path / "2026-07-12.m4a"
+    path.write_bytes(b"x")
+    assert is_technical_name(path.stem)
+    doc = RawDoc(
+        schema=1, content_hash="h", source_name=path.name, source_path=str(path),
+        language="ru", duration_sec=1.0, num_speakers=1, is_monologue=True,
+        asr=AsrInfo("mlx", "large-v3", False), created_at="",
+        summary=Summary(title="Title from LLM", text="s"),
+    )
+    title, day = resolve_title_and_date(path.name, path, doc)
+    assert title == "Title from LLM"
+    assert day.isoformat() == "2026-07-12"
+
+
+def test_resolve_title_technical_name_without_summary_falls_back_to_date(tmp_path):
+    path = tmp_path / "REC_20260712.m4a"
+    path.write_bytes(b"x")
+    doc = RawDoc(
+        schema=1, content_hash="h", source_name=path.name, source_path=str(path),
+        language="ru", duration_sec=1.0, num_speakers=0, is_monologue=True,
+        asr=None, created_at="", summary=None,
+    )
+    title, day = resolve_title_and_date(path.name, path, doc)
+    assert title == default_title_for_date(day)
+
+
+# --- Pipeline.run_all (fresh audio, staged) -------------------------------
+
+def _fake_normalize(path, tmp_dir):
+    return Path(str(tmp_dir / f"{path.stem}.wav")), 3.0
+
+
+def _fake_asr():
+    return AsrResult(
+        language="ru", backend="mlx", model="large-v3", turbo=False,
+        segments=[AsrSegment(0.0, 1.0, "hello", words=[AsrWord("hello", 0.0, 1.0)])],
+    )
+
+
+def _fake_diar():
+    return DiarResult(segments=[DiarSegment(0.0, 1.0, "SPEAKER_00")])
+
+
+def _make_pipeline(tmp_path, **stage_overrides):
+    cfg = Config(
+        out_folder=str(tmp_path / "out"),
+        systems_folder=str(tmp_path / "systems"),
+        logs_folder=str(tmp_path / "logs"),
+    )
+    manifest = Manifest(tmp_path / "systems" / "manifest.json")
+    defaults = dict(
+        normalize=_fake_normalize,
+        transcribe=lambda wav, turbo, log: _fake_asr(),
+        diarize=lambda wav, device, s, mn, mx, log: _fake_diar(),
+        summarize=lambda doc, cfg, log: __import__("transcriber.models", fromlist=["Summary"]).Summary(
+            title="T", text="Recap"
+        ),
+    )
+    defaults.update(stage_overrides)
+    return cfg, manifest, Pipeline(cfg, manifest, **defaults)
+
+
+def test_run_all_full_mode_marks_done_and_writes_files(tmp_path):
+    cfg, manifest, pipeline = _make_pipeline(tmp_path)
+    task = _task(path=tmp_path / "team call.m4a")
+    task.path.write_bytes(b"fake audio")
+
+    pipeline.run_all([task], RunOptions(mode="full"), jobs=2)
+
+    entry = manifest.get(task.content_hash)
+    assert entry.status == "done"
+    assert Path(entry.out_path).exists()
+    assert Path(entry.raw_path).exists()
+    assert "Hello" in Path(entry.out_path).read_text(encoding="utf-8") or "hello" in Path(entry.out_path).read_text(encoding="utf-8")
+
+
+def test_run_all_text_mode_never_calls_diarize_or_summarize(tmp_path):
+    def boom(*a, **k):
+        raise AssertionError("should not be called in --text mode")
+
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, diarize=boom, summarize=boom)
+    task = _task(path=tmp_path / "team call.m4a")
+    task.path.write_bytes(b"fake audio")
+
+    pipeline.run_all([task], RunOptions(mode="text"), jobs=1)
+
+    entry = manifest.get(task.content_hash)
+    assert entry.status == "done"
+    md = Path(entry.out_path).read_text(encoding="utf-8")
+    assert "### Summary" not in md
+
+
+def test_run_all_stage_a_failure_marks_failed_and_does_not_crash_others(tmp_path):
+    def failing_normalize(path, tmp_dir):
+        if "bad" in path.name:
+            raise RuntimeError("ffmpeg exploded")
+        return _fake_normalize(path, tmp_dir)
+
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, normalize=failing_normalize)
+    good = _task(name="good.m4a", content_hash="blake2b:good", path=tmp_path / "good.m4a")
+    bad = _task(name="bad.m4a", content_hash="blake2b:bad", path=tmp_path / "bad.m4a")
+    good.path.write_bytes(b"x")
+    bad.path.write_bytes(b"x")
+
+    pipeline.run_all([good, bad], RunOptions(mode="full"), jobs=2)
+
+    assert manifest.get("blake2b:good").status == "done"
+    failed = manifest.get("blake2b:bad")
+    assert failed.status == "failed"
+    assert "ffmpeg exploded" in failed.error
+
+
+def test_run_all_gpu_stage_is_never_called_concurrently(tmp_path):
+    concurrent = {"count": 0, "max": 0}
+    lock = threading.Lock()
+
+    def tracking_transcribe(wav, turbo, log):
+        with lock:
+            concurrent["count"] += 1
+            concurrent["max"] = max(concurrent["max"], concurrent["count"])
+        time.sleep(0.05)
+        with lock:
+            concurrent["count"] -= 1
+        return _fake_asr()
+
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, transcribe=tracking_transcribe)
+    tasks = []
+    for i in range(4):
+        p = tmp_path / f"f{i}.m4a"
+        p.write_bytes(b"x")
+        tasks.append(_task(name=f"f{i}.m4a", content_hash=f"blake2b:h{i}", path=p))
+
+    pipeline.run_all(tasks, RunOptions(mode="full"), jobs=4)
+
+    assert concurrent["max"] == 1
+    for t in tasks:
+        assert manifest.get(t.content_hash).status == "done"
+
+
+# --- process_existing_raw (--summary / --resummarize / --rerender) -------
+
+def _write_raw_doc(tmp_path, cfg_systems_folder, content_hash="blake2b:raw1", source_name="team call.m4a"):
+    from transcriber.models import AsrInfo, Segment
+    from transcriber.pipeline import atomic_write_json, hash_hex
+
+    source_path = tmp_path / source_name
+    source_path.write_bytes(b"x")
+    doc = RawDoc(
+        schema=1, content_hash=content_hash, source_name=source_name, source_path=str(source_path),
+        language="ru", duration_sec=10.0, num_speakers=1, is_monologue=True,
+        asr=AsrInfo("mlx", "large-v3", False), created_at="2026-01-01T00:00:00Z",
+        segments=[Segment(0.0, 2.0, None, "hello")], summary=None,
+    )
+    raw_path = Path(cfg_systems_folder) / "raw" / f"{hash_hex(content_hash)}.json"
+    atomic_write_json(raw_path, doc.to_dict())
+    return raw_path, doc
+
+
+def test_process_existing_raw_resummarize_calls_summarize_not_asr(tmp_path):
+    def boom(*a, **k):
+        raise AssertionError("ASR must not run for --resummarize")
+
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, normalize=boom, transcribe=boom, diarize=boom)
+    raw_path, _ = _write_raw_doc(tmp_path, cfg.systems_folder)
+
+    pipeline.process_existing_raw(raw_path, RunOptions(mode="resummarize"))
+
+    entry = manifest.get("blake2b:raw1")
+    assert entry.status == "done"
+    md = Path(entry.out_path).read_text(encoding="utf-8")
+    assert "Recap" in md
+
+
+def test_process_existing_raw_rerender_skips_summarize(tmp_path):
+    def boom(*a, **k):
+        raise AssertionError("summarize must not run for --rerender")
+
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, summarize=boom)
+    raw_path, _ = _write_raw_doc(tmp_path, cfg.systems_folder)
+
+    pipeline.process_existing_raw(raw_path, RunOptions(mode="rerender"))
+
+    entry = manifest.get("blake2b:raw1")
+    assert entry.status == "done"
+    md = Path(entry.out_path).read_text(encoding="utf-8")
+    assert "### Summary" not in md
+
+
+def test_process_existing_raw_reuses_existing_out_path_on_rerender(tmp_path):
+    cfg, manifest, pipeline = _make_pipeline(tmp_path)
+    raw_path, _ = _write_raw_doc(tmp_path, cfg.systems_folder)
+
+    pipeline.process_existing_raw(raw_path, RunOptions(mode="resummarize"))
+    first_out = manifest.get("blake2b:raw1").out_path
+
+    pipeline.process_existing_raw(raw_path, RunOptions(mode="rerender"))
+    second_out = manifest.get("blake2b:raw1").out_path
+
+    assert first_out == second_out

@@ -1,0 +1,12 @@
+# TODO: pin exact versions after first successful `pip install` on the target
+# M4 Max machine — mlx/pyannote/torch release cadence is fast and some
+# combinations lag behind the newest CPython, so versions are floor-pinned
+# here rather than exact-pinned.
+mlx-whisper>=0.4.0
+pyannote.audio>=3.1.0
+torch>=2.2.0
+torchaudio>=2.2.0
+ollama>=0.3.0
+tqdm>=4.66.0
+python-dotenv>=1.0.0
+tomli>=2.0.0; python_version < "3.11"
