@@ -130,6 +130,40 @@ def _strip_unnamed_raw_labels(segments: list[Segment]) -> list[Segment]:
     return result
 
 
+def fold_phantom_speakers(segments: list[Segment], min_share: float) -> list[Segment]:
+    """Reassign segments of tiny "phantom" speakers to the nearest real speaker.
+
+    Diarization sometimes invents an extra speaker from noise/short bursts. Any
+    speaker whose share of total speech is below `min_share` is folded into the
+    nearest real speaker by time. `min_share <= 0` disables this (no-op)."""
+    if min_share <= 0:
+        return segments
+    totals = compute_total_speech(segments)
+    if len(totals) <= 1:
+        return segments
+    total = sum(totals.values())
+    if total <= 0:
+        return segments
+    real = {sp for sp, sec in totals.items() if sec / total >= min_share}
+    if not real or len(real) == len(totals):
+        return segments  # nothing to fold, or folding would remove every speaker
+    real_segments = [s for s in segments if s.speaker in real]
+
+    def nearest_real_speaker(seg: Segment) -> str:
+        best = min(real_segments, key=lambda r: min(abs(r.start - seg.start), abs(r.end - seg.end)))
+        return best.speaker
+
+    result: list[Segment] = []
+    for s in segments:
+        if s.speaker is not None and s.speaker not in real:
+            new_speaker = nearest_real_speaker(s)
+            words = [Word(w=w.w, start=w.start, end=w.end, speaker=new_speaker if w.speaker else w.speaker) for w in s.words]
+            result.append(Segment(start=s.start, end=s.end, speaker=new_speaker, text=s.text, words=words))
+        else:
+            result.append(s)
+    return result
+
+
 def merge(
     asr: AsrResult,
     diar: DiarResult,
@@ -141,8 +175,10 @@ def merge(
     source_name: str,
     source_path: str,
     duration_sec: float,
+    min_speaker_share: float = 0.0,
 ) -> RawDoc:
     segments = build_segments(asr, diar)
+    segments = fold_phantom_speakers(segments, min_speaker_share)
     is_monologue = collapse_monologue(segments, mono_threshold)
     totals = compute_total_speech(segments)
 

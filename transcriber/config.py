@@ -16,7 +16,7 @@ _SIMPLE_KEYS = (
     "input_folder", "out_folder", "systems_folder", "logs_folder",
     "asr_model", "asr_language", "asr_prompt_extra",
     "llm_model", "llm_ctx", "diarize_device",
-    "mono_threshold", "jobs", "obsidian_frontmatter", "wikilink_speakers",
+    "mono_threshold", "min_speaker_share", "jobs", "obsidian_frontmatter", "wikilink_speakers",
 )
 
 
@@ -48,6 +48,7 @@ class Config:
     llm_ctx: int = 8192
     diarize_device: str = "mps"
     mono_threshold: float = 0.92
+    min_speaker_share: float = 0.02
     jobs: int = 3
     obsidian_frontmatter: bool = True
     wikilink_speakers: bool = False

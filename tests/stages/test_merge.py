@@ -1,6 +1,6 @@
 import logging
 
-from transcriber.models import AsrResult, AsrSegment, AsrWord, DiarResult, DiarSegment
+from transcriber.models import AsrResult, AsrSegment, AsrWord, DiarResult, DiarSegment, Segment, Word
 from transcriber.stages.merge import (
     apply_names,
     assign_speaker,
@@ -8,6 +8,7 @@ from transcriber.stages.merge import (
     build_text_doc,
     collapse_monologue,
     compute_total_speech,
+    fold_phantom_speakers,
     merge,
 )
 
@@ -186,3 +187,44 @@ def test_build_text_doc_has_no_speakers():
     assert doc.is_monologue is True
     assert all(s.speaker is None for s in doc.segments)
     assert doc.speakers_meta == []
+
+
+def test_fold_phantom_speakers_merges_tiny_speaker_into_nearest():
+    segs = [
+        Segment(0.0, 100.0, "SPEAKER_00", "a", [Word("a", 0.0, 100.0, "SPEAKER_00")]),
+        Segment(100.0, 190.0, "SPEAKER_01", "b", [Word("b", 100.0, 190.0, "SPEAKER_01")]),
+        Segment(190.0, 191.0, "SPEAKER_02", "c", [Word("c", 190.0, 191.0, "SPEAKER_02")]),
+    ]
+    out = fold_phantom_speakers(segs, min_share=0.02)
+    speakers = {s.speaker for s in out}
+    assert speakers == {"SPEAKER_00", "SPEAKER_01"}
+    assert out[2].speaker == "SPEAKER_01"  # nearest by time
+    assert out[2].words[0].speaker == "SPEAKER_01"
+
+
+def test_fold_phantom_speakers_noop_when_threshold_zero():
+    segs = [
+        Segment(0.0, 100.0, "SPEAKER_00", "a", []),
+        Segment(190.0, 191.0, "SPEAKER_02", "c", []),
+    ]
+    out = fold_phantom_speakers(segs, min_share=0.0)
+    assert {s.speaker for s in out} == {"SPEAKER_00", "SPEAKER_02"}
+
+
+def test_merge_folds_phantom_speaker_into_two(caplog):
+    asr = AsrResult(
+        language="ru", backend="mlx", model="large-v3", turbo=False,
+        segments=[
+            AsrSegment(0.0, 100.0, "aaa", words=[AsrWord("aaa", 0.0, 100.0)]),
+            AsrSegment(100.0, 190.0, "bbb", words=[AsrWord("bbb", 100.0, 190.0)]),
+            AsrSegment(190.0, 191.0, "ccc", words=[AsrWord("ccc", 190.0, 191.0)]),
+        ],
+    )
+    diar = DiarResult(segments=[
+        DiarSegment(0.0, 100.0, "SPEAKER_00"),
+        DiarSegment(100.0, 190.0, "SPEAKER_01"),
+        DiarSegment(190.0, 191.0, "SPEAKER_02"),
+    ])
+    doc = merge(asr, diar, mono_threshold=0.99, names=None, log=LOG, min_speaker_share=0.02,
+                content_hash="h", source_name="x.m4a", source_path="/x.m4a", duration_sec=191.0)
+    assert doc.num_speakers == 2

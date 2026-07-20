@@ -253,6 +253,7 @@ class Pipeline:
                     asr, diar, self.cfg.mono_threshold, opts.names, log,
                     content_hash=task.content_hash, source_name=task.source_name,
                     source_path=str(task.path), duration_sec=ctx.duration,
+                    min_speaker_share=self.cfg.min_speaker_share,
                 )
             ctx.doc = doc
             log.info(f"ASR done: language={doc.language}, segments={len(doc.segments)}")
