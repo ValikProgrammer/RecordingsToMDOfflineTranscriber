@@ -78,3 +78,20 @@ def test_build_run_options_no_frontmatter_flag():
     args = parse_args(["--no-frontmatter"])
     opts = build_run_options(args, "full")
     assert opts.frontmatter is False
+
+
+def test_language_flag_overrides_asr_language():
+    from transcriber.cli import apply_overrides, parse_args
+    from transcriber.config import Config
+
+    cfg = apply_overrides(Config(), parse_args(["--language", "en"]))
+    assert cfg.asr_language == "en"
+
+
+def test_no_language_flag_keeps_config_asr_language():
+    from transcriber.cli import apply_overrides, parse_args
+    from transcriber.config import Config
+
+    cfg = Config(asr_language="ru")
+    cfg = apply_overrides(cfg, parse_args([]))
+    assert cfg.asr_language == "ru"
