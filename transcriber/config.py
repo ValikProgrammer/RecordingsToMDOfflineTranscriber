@@ -14,7 +14,7 @@ USER_CONFIG_PATH = Path.home() / ".config" / "transcriber" / "config.toml"
 
 _SIMPLE_KEYS = (
     "input_folder", "out_folder", "systems_folder", "logs_folder",
-    "asr_model", "asr_language", "asr_prompt_extra",
+    "asr_model", "asr_language", "asr_prompt_extra", "asr_artifact_denylist_extra",
     "llm_model", "llm_ctx", "diarize_device",
     "mono_threshold", "jobs", "obsidian_frontmatter", "wikilink_speakers",
 )
@@ -44,6 +44,7 @@ class Config:
     asr_model: str = "large-v3"
     asr_language: str = "ru"
     asr_prompt_extra: str = ""
+    asr_artifact_denylist_extra: list[str] = field(default_factory=list)
     llm_model: str = "qwen2.5:14b"
     llm_ctx: int = 8192
     diarize_device: str = "mps"

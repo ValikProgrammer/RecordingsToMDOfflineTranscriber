@@ -106,3 +106,33 @@ def test_build_initial_prompt_appends_extra():
     combined = build_initial_prompt("ФизТех, Богодаров")
     assert combined.startswith(DEFAULT_INITIAL_PROMPT)
     assert "ФизТех, Богодаров" in combined
+
+
+def _seg(text):
+    from transcriber.models import AsrSegment
+    return AsrSegment(start=0.0, end=1.0, text=text, words=[])
+
+
+def test_filter_artifact_segments_drops_known_hallucinations():
+    from transcriber.stages.asr_mlx import filter_artifact_segments
+
+    segs = [
+        _seg("Продолжение следует..."),
+        _seg("Спасибо за просмотр!"),
+        _seg("Thank you for watching! Thank you for watching!"),
+        _seg("Субтитры сделал DimaTorzok"),
+        _seg("Редактор субтитров А.Синецкая"),
+        _seg("Да, про хакатон говорили."),
+        _seg("Спасибо, я понял."),
+    ]
+    kept = filter_artifact_segments(segs)
+    texts = [s.text for s in kept]
+    assert texts == ["Да, про хакатон говорили.", "Спасибо, я понял."]
+
+
+def test_filter_artifact_segments_honors_extra_denylist():
+    from transcriber.stages.asr_mlx import filter_artifact_segments
+
+    segs = [_seg("Реклама казино вулкан"), _seg("нормальный текст")]
+    kept = filter_artifact_segments(segs, extra=["реклама казино вулкан"])
+    assert [s.text for s in kept] == ["нормальный текст"]
