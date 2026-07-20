@@ -2,7 +2,13 @@ import logging
 import sys
 import types
 
-from transcriber.stages.asr_mlx import FULL_REPO, TURBO_REPO, transcribe
+from transcriber.stages.asr_mlx import (
+    DEFAULT_INITIAL_PROMPT,
+    FULL_REPO,
+    TURBO_REPO,
+    build_initial_prompt,
+    transcribe,
+)
 
 LOG = logging.getLogger("test")
 
@@ -10,11 +16,12 @@ LOG = logging.getLogger("test")
 def _install_fake_mlx_whisper(monkeypatch, fixture, capture=None):
     fake_module = types.ModuleType("mlx_whisper")
 
-    def fake_transcribe(path, path_or_hf_repo, word_timestamps):
+    def fake_transcribe(path, **kwargs):
         if capture is not None:
             capture["path"] = path
-            capture["repo"] = path_or_hf_repo
-            capture["word_timestamps"] = word_timestamps
+            capture["repo"] = kwargs.get("path_or_hf_repo")
+            capture["word_timestamps"] = kwargs.get("word_timestamps")
+            capture.update(kwargs)
         return fixture
 
     fake_module.transcribe = fake_transcribe
@@ -68,3 +75,34 @@ def test_transcribe_uses_full_repo_by_default(monkeypatch, tmp_path):
     transcribe(tmp_path / "a.wav", turbo=False, log=LOG)
 
     assert capture["repo"] == FULL_REPO
+
+
+def test_transcribe_passes_language_and_antihallucination(monkeypatch, tmp_path):
+    fixture = {"language": "ru", "segments": []}
+    capture = {}
+    _install_fake_mlx_whisper(monkeypatch, fixture, capture)
+
+    transcribe(tmp_path / "a.wav", turbo=False, log=LOG, language="ru", initial_prompt="glossary here")
+
+    assert capture["language"] == "ru"
+    assert capture["condition_on_previous_text"] is False
+    assert capture["hallucination_silence_threshold"] == 2.0
+    assert capture["initial_prompt"] == "glossary here"
+    assert capture["word_timestamps"] is True
+
+
+def test_transcribe_omits_language_when_auto(monkeypatch, tmp_path):
+    fixture = {"language": "ru", "segments": []}
+    capture = {}
+    _install_fake_mlx_whisper(monkeypatch, fixture, capture)
+
+    transcribe(tmp_path / "a.wav", turbo=False, log=LOG, language=None, initial_prompt=None)
+
+    assert "language" not in capture
+
+
+def test_build_initial_prompt_appends_extra():
+    assert build_initial_prompt("") == DEFAULT_INITIAL_PROMPT
+    combined = build_initial_prompt("ФизТех, Богодаров")
+    assert combined.startswith(DEFAULT_INITIAL_PROMPT)
+    assert "ФизТех, Богодаров" in combined
