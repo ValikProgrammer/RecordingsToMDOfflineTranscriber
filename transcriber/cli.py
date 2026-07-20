@@ -28,6 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wikilink-speakers", dest="wikilink_speakers", action="store_true")
     parser.add_argument("--llm-model", dest="llm_model", default=None)
     parser.add_argument("--language", dest="language", default=None)
+    parser.add_argument("--enroll", dest="enroll", default=None, metavar="NAME")
     parser.add_argument("--jobs", dest="jobs", type=int, default=None)
     parser.add_argument("--diarize-device", dest="diarize_device", choices=["mps", "cpu"], default=None)
     parser.add_argument("--dry-run", dest="dry_run", action="store_true")

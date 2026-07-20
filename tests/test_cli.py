@@ -95,3 +95,10 @@ def test_no_language_flag_keeps_config_asr_language():
     cfg = Config(asr_language="ru")
     cfg = apply_overrides(cfg, parse_args([]))
     assert cfg.asr_language == "ru"
+
+
+def test_enroll_flag_parsed():
+    from transcriber.cli import parse_args
+
+    assert parse_args(["--enroll", "Галя"]).enroll == "Галя"
+    assert parse_args([]).enroll is None
