@@ -324,3 +324,30 @@ def test_stage_b_auto_language_passes_none(tmp_path):
     pipeline.run_all([task], RunOptions(mode="full"), jobs=1)
 
     assert captured["language"] is None
+
+
+def test_stage_b_runs_diarize_concurrently_and_merges(tmp_path):
+    started = {"asr": threading.Event(), "diar": threading.Event()}
+    both_running = {"ok": False}
+
+    def slow_transcribe(wav, turbo, log, **kw):
+        started["asr"].set()
+        both_running["ok"] = started["diar"].wait(timeout=2.0)
+        return _fake_asr()
+
+    def slow_diarize(wav, device, s, mn, mx, log):
+        started["diar"].set()
+        started["asr"].wait(timeout=2.0)
+        return _fake_diar()
+
+    cfg, manifest, pipeline = _make_pipeline(
+        tmp_path, transcribe=slow_transcribe, diarize=slow_diarize
+    )
+    task = _task(path=tmp_path / "team call.m4a")
+    task.path.write_bytes(b"x")
+
+    pipeline.run_all([task], RunOptions(mode="full"), jobs=1)
+
+    assert both_running["ok"] is True
+    entry = manifest.get(task.content_hash)
+    assert entry.status == "done"
