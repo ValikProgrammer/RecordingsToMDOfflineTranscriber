@@ -11,6 +11,8 @@ llm_ctx      = 8192            # if the transcript is longer, map-reduce the sum
 diarize_device = "mps"         # mps | cpu
 mono_threshold = 0.92          # dominant speaker's share of speech time above which it's treated as a monologue
 min_speaker_share = 0.02       # speakers below this share of total speech are folded into the nearest (0 = off)
+voiceprint_enabled = true      # auto-name speakers from the voice DB; enroll by passing --names or `--enroll "Name"`
+voiceprint_threshold = 0.7     # cosine-similarity threshold for matching a voice (higher = stricter)
 jobs = 3                       # workers for CPU stages (ffmpeg/summary/render); the GPU stage is always 1
 obsidian_frontmatter = true    # add a YAML frontmatter (properties) block to the top of the .md
 wikilink_speakers = false      # render named speakers as [[Name]] (Obsidian graph/backlinks)

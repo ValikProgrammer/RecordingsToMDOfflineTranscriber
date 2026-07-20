@@ -225,6 +225,16 @@ class Pipeline:
             self._fail(task, log_path, log, exc)
             return None
 
+    def _apply_voiceprints(self, doc: RawDoc, log: logging.Logger) -> None:
+        """Enroll confirmed (--names) speakers, then auto-name the rest from the store."""
+        from . import voiceprints
+
+        store = voiceprints.VoiceprintStore(Path(self.cfg.systems_folder) / "voiceprints")
+        for sm in doc.speakers_meta:
+            if sm.name and sm.embedding:  # confirmed name from --names — treat as ground truth
+                store.enroll(sm.name, sm.embedding)
+        voiceprints.identify_speakers(doc, store, self.cfg.voiceprint_threshold)
+
     def _safe_stage_b(self, ctx: _Ctx, opts: RunOptions) -> _Ctx | None:
         task, log = ctx.task, ctx.log
         try:
@@ -262,6 +272,8 @@ class Pipeline:
                     source_path=str(task.path), duration_sec=ctx.duration,
                     min_speaker_share=self.cfg.min_speaker_share,
                 )
+                if self.cfg.voiceprint_enabled:
+                    self._apply_voiceprints(doc, log)
             ctx.doc = doc
             log.info(f"ASR done: language={doc.language}, segments={len(doc.segments)}")
             return ctx

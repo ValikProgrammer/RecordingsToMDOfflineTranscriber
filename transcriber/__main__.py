@@ -88,6 +88,42 @@ def cmd_run(cfg: Config, args, log) -> int:
     return 0
 
 
+def cmd_enroll(cfg: Config, args, log) -> int:
+    """Enroll a name's voiceprint from clean sample audio in the input folder."""
+    import tempfile
+
+    from .stages.audio import normalize
+    from .stages.diarize import diarize
+    from .stages.ingest import scan_audio_files
+    from .voiceprints import VoiceprintStore
+
+    files = scan_audio_files(Path(cfg.input_folder))
+    if not files:
+        print(f"No audio files found in {cfg.input_folder} to enroll from.")
+        return 1
+
+    store = VoiceprintStore(Path(cfg.systems_folder) / "voiceprints")
+    enrolled = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        for f in files:
+            wav, _ = normalize(f, Path(tmp))
+            diar = diarize(wav, cfg.diarize_device, None, None, None, log)
+            if not diar.total_speech_sec:
+                print(f"skip {f.name}: no speech detected")
+                continue
+            dominant = max(diar.total_speech_sec, key=diar.total_speech_sec.get)
+            embedding = diar.embeddings.get(dominant)
+            if not embedding:
+                print(f"skip {f.name}: no embedding for dominant speaker")
+                continue
+            store.enroll(args.enroll, embedding)
+            enrolled += 1
+            print(f"enrolled {args.enroll} from {f.name}")
+
+    print(f"Enrolled {enrolled} sample(s) for {args.enroll}.")
+    return 0 if enrolled else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     # Load HF_TOKEN (and any other vars) from a .env in the working directory so
     # `python -m transcriber` just works after activating the venv, without needing
@@ -102,6 +138,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.warmup:
         return cmd_warmup(cfg, log)
+    if args.enroll:
+        return cmd_enroll(cfg, args, log)
     if args.dry_run:
         return cmd_dry_run(cfg, args)
     return cmd_run(cfg, args, log)

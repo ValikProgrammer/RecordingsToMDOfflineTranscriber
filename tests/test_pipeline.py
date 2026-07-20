@@ -372,3 +372,49 @@ def test_stage_b_filters_asr_artifacts(tmp_path):
     md = Path(manifest.get(task.content_hash).out_path).read_text(encoding="utf-8")
     assert "Спасибо за просмотр" not in md
     assert "реальный текст" in md
+
+
+def _dv_transcribe(wav, turbo, log, **kw):
+    return AsrResult(
+        language="ru", backend="mlx", model="large-v3", turbo=False,
+        segments=[
+            AsrSegment(0.0, 50.0, "aaa", words=[AsrWord("aaa", 0.0, 50.0)]),
+            AsrSegment(50.0, 100.0, "bbb", words=[AsrWord("bbb", 50.0, 100.0)]),
+        ],
+    )
+
+
+def _dv_diar(wav, device, s, mn, mx, log):
+    return DiarResult(
+        segments=[DiarSegment(0.0, 50.0, "SPEAKER_00"), DiarSegment(50.0, 100.0, "SPEAKER_01")],
+        embeddings={"SPEAKER_00": [1.0, 0.0, 0.0], "SPEAKER_01": [0.0, 1.0, 0.0]},
+        total_speech_sec={"SPEAKER_00": 50.0, "SPEAKER_01": 50.0},
+    )
+
+
+def test_stage_b_autonames_speaker_from_voiceprints(tmp_path):
+    from transcriber.voiceprints import VoiceprintStore
+
+    VoiceprintStore(tmp_path / "systems" / "voiceprints").enroll("Галя", [1.0, 0.0, 0.0])
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, transcribe=_dv_transcribe, diarize=_dv_diar)
+    task = _task(path=tmp_path / "team call.m4a")
+    task.path.write_bytes(b"x")
+
+    pipeline.run_all([task], RunOptions(mode="full"), jobs=1)
+
+    md = Path(manifest.get(task.content_hash).out_path).read_text(encoding="utf-8")
+    assert "Галя" in md
+
+
+def test_stage_b_enrolls_named_speakers(tmp_path):
+    from transcriber.voiceprints import VoiceprintStore
+
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, transcribe=_dv_transcribe, diarize=_dv_diar)
+    task = _task(path=tmp_path / "team call.m4a")
+    task.path.write_bytes(b"x")
+
+    pipeline.run_all([task], RunOptions(mode="full", names=["Галя", "Иван"]), jobs=1)
+
+    store = VoiceprintStore(tmp_path / "systems" / "voiceprints")
+    assert store.identify([1.0, 0.0, 0.0], threshold=0.7) == "Галя"
+    assert store.identify([0.0, 1.0, 0.0], threshold=0.7) == "Иван"
