@@ -14,9 +14,10 @@ M-series (Metal/MPS).
 The script is idempotent: it installs `ffmpeg` (Homebrew), creates a `.venv`
 and installs dependencies, checks for `ollama` and pulls `qwen2.5:14b`, asks
 once for a HuggingFace token for `pyannote` (saved to `.env`), and warms up
-the models (`--warmup`). Don't forget to accept the model terms at
-https://huggingface.co/pyannote/speaker-diarization-3.1 — otherwise
-diarization fails with a clear error on first run.
+the models (`--warmup`). Accept the model terms for **both** gated repos —
+https://huggingface.co/pyannote/speaker-diarization-3.1 and
+https://huggingface.co/pyannote/speaker-diarization-community-1 (pyannote 4.x
+pulls the latter) — otherwise diarization fails with a 403 on first run.
 
 ## Usage
 
@@ -42,6 +43,15 @@ python -m transcriber --rerender
 # one file, fast mode, known speaker count, names by speaking order
 python -m transcriber --only "call with Kate" --turbo --speakers 2 --names "Me,Kate"
 
+# force a non-default language ("" / "auto" = auto-detect)
+python -m transcriber --language en
+
+# also write a cleaned-up, readable version to out/pretty/
+python -m transcriber --pretty
+
+# enroll a voice from clean sample audio so it's auto-named in future runs
+python -m transcriber --enroll "Kate" --input-folder ./sample
+
 # requeue previously failed files
 python -m transcriber --retry-failed
 ```
@@ -61,8 +71,11 @@ python -m transcriber --retry-failed
 | `--rerender` | rebuild `.md` from raw JSON without ASR/LLM |
 | `--retry-failed` | requeue `failed` files |
 | `--turbo` | use `large-v3-turbo` |
+| `--language CODE` | force decode language (default from config, `ru`); `""`/`auto` = auto-detect |
 | `--speakers` / `--min-speakers` / `--max-speakers` | diarization hints |
-| `--names "Me,Kate"` | names in order of first appearance in the audio |
+| `--names "Me,Kate"` | names in order of first appearance; also enrolls their voiceprints |
+| `--enroll NAME` | enroll a voice from the input folder's audio into the voice DB, then exit |
+| `--pretty` | also write an LLM-cleaned readable transcript to `out/pretty/` |
 | `--no-frontmatter` | skip the Obsidian YAML frontmatter |
 | `--wikilink-speakers` | render named speakers as `[[Name]]` |
 | `--llm-model NAME` | Ollama model |
@@ -76,13 +89,20 @@ Config is looked up at `./config.toml`, then
 `~/.config/transcriber/config.toml`; template at `config.example.toml`. CLI
 flags override the config.
 
+Notable config keys (see `config.example.toml` for all): `asr_language`,
+`asr_prompt_extra` (glossary terms/names to bias ASR), `asr_artifact_denylist_extra`
+(extra hallucination phrases to strip), `min_speaker_share` (fold phantom
+low-speech speakers; `0` = off), `voiceprint_enabled` / `voiceprint_threshold`
+(auto-name speakers from the voice DB).
+
 ## Layout
 
 ```
 out/                    # .md only — this is a subfolder of the Obsidian vault
+out/pretty/             # LLM-cleaned readable transcripts (only with --pretty)
 systems/raw/<hash>.json # raw transcript+diarization — source of truth
 systems/manifest.json   # processing status, dedup by content hash
-systems/voiceprints/    # groundwork for future voice-ID
+systems/voiceprints/    # enrolled voice embeddings, one JSON per name
 logs/run.log            # run log
 logs/<name>__<hash8>.log # per-file log
 ```
@@ -108,11 +128,12 @@ logs/<name>__<hash8>.log # per-file log
   `in_progress` **before** the heavy work and `done` **only after** raw+md
   are written atomically, so an interruption never leaves a "half" file
   marked done.
-- **Voice-ID is groundwork, not an implementation.** `stages/diarize.py`
-  already extracts a per-speaker embedding into `speakers_meta`;
-  `voiceprints.py` provides the interface (`enroll`/`identify`), but the
-  methods are no-ops. When voice-ID is needed, the embeddings will already be
-  in every raw JSON — no ASR/diarize rework required.
+- **Voice-ID by embedding, not a fixed model.** `stages/diarize.py` extracts a
+  per-speaker embedding into `speakers_meta`; `voiceprints.py` enrolls those
+  under names (via `--names` or `--enroll`) and matches new speakers by cosine
+  similarity, so `SPEAKER_00` becomes e.g. `Kate` across recordings. Confirmed
+  `--names` speakers are the ground truth that gets enrolled; auto-matches only
+  relabel, they don't feed back into the store.
 
 ## Obsidian
 
@@ -120,8 +141,9 @@ Point `--out` at a subfolder inside an Obsidian vault — only `.md` files land
 there. `systems/` and `logs/` sit next to `out/`, outside the vault (the
 default; if you do put them inside the vault, exclude them via
 `.obsidianignore`/Excluded files). Notes come with YAML frontmatter
-(`title`/`date`/`language`/`speakers`/`duration`/`source_file`/`tags`) —
-ready for Properties, the tag pane, Dataview, and the graph.
+(`Title`/`Date`/`Language`/`Speakers`/`Duration`/`Source file`, plus lowercase
+`tags` so Obsidian treats them as real tags) — ready for Properties, the tag
+pane, Dataview, and the graph.
 `--wikilink-speakers` renders named speakers as `[[Name]]` for backlinks and
 graph nodes; `Speaker 1/2` is never turned into a wikilink. `--no-frontmatter`
 disables the frontmatter if you don't need it.
