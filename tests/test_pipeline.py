@@ -140,7 +140,7 @@ def _make_pipeline(tmp_path, **stage_overrides):
     manifest = Manifest(tmp_path / "systems" / "manifest.json")
     defaults = dict(
         normalize=_fake_normalize,
-        transcribe=lambda wav, turbo, log: _fake_asr(),
+        transcribe=lambda wav, turbo, log, **kw: _fake_asr(),
         diarize=lambda wav, device, s, mn, mx, log: _fake_diar(),
         summarize=lambda doc, cfg, log: __import__("transcriber.models", fromlist=["Summary"]).Summary(
             title="T", text="Recap"
@@ -204,7 +204,7 @@ def test_run_all_gpu_stage_is_never_called_concurrently(tmp_path):
     concurrent = {"count": 0, "max": 0}
     lock = threading.Lock()
 
-    def tracking_transcribe(wav, turbo, log):
+    def tracking_transcribe(wav, turbo, log, **kw):
         with lock:
             concurrent["count"] += 1
             concurrent["max"] = max(concurrent["max"], concurrent["count"])
@@ -287,3 +287,40 @@ def test_process_existing_raw_reuses_existing_out_path_on_rerender(tmp_path):
     second_out = manifest.get("blake2b:raw1").out_path
 
     assert first_out == second_out
+
+
+def test_stage_b_passes_language_and_prompt_from_config(tmp_path):
+    captured = {}
+
+    def spy_transcribe(wav, turbo, log, language=None, initial_prompt=None):
+        captured["language"] = language
+        captured["initial_prompt"] = initial_prompt
+        return _fake_asr()
+
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, transcribe=spy_transcribe)
+    cfg.asr_language = "ru"
+    cfg.asr_prompt_extra = "ФизТех"
+    task = _task(path=tmp_path / "team call.m4a")
+    task.path.write_bytes(b"x")
+
+    pipeline.run_all([task], RunOptions(mode="full"), jobs=1)
+
+    assert captured["language"] == "ru"
+    assert "ФизТех" in captured["initial_prompt"]
+
+
+def test_stage_b_auto_language_passes_none(tmp_path):
+    captured = {}
+
+    def spy_transcribe(wav, turbo, log, language=None, initial_prompt=None):
+        captured["language"] = language
+        return _fake_asr()
+
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, transcribe=spy_transcribe)
+    cfg.asr_language = "auto"
+    task = _task(path=tmp_path / "team call.m4a")
+    task.path.write_bytes(b"x")
+
+    pipeline.run_all([task], RunOptions(mode="full"), jobs=1)
+
+    assert captured["language"] is None

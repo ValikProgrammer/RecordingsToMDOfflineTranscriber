@@ -228,7 +228,10 @@ class Pipeline:
     def _safe_stage_b(self, ctx: _Ctx, opts: RunOptions) -> _Ctx | None:
         task, log = ctx.task, ctx.log
         try:
-            asr = self.transcribe(ctx.wav_path, opts.turbo, log)
+            lang = self.cfg.asr_language.strip()
+            language = None if lang.lower() in ("", "auto") else lang
+            prompt = asr_mlx.build_initial_prompt(self.cfg.asr_prompt_extra)
+            asr = self.transcribe(ctx.wav_path, opts.turbo, log, language=language, initial_prompt=prompt)
             if opts.mode == "text":
                 doc = merge_stage.build_text_doc(
                     asr, content_hash=task.content_hash, source_name=task.source_name,
