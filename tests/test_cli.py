@@ -102,3 +102,12 @@ def test_enroll_flag_parsed():
 
     assert parse_args(["--enroll", "Галя"]).enroll == "Галя"
     assert parse_args([]).enroll is None
+
+
+def test_pretty_flag_sets_run_option():
+    from transcriber.cli import build_run_options, parse_args, resolve_mode
+
+    args = parse_args(["--pretty"])
+    opts = build_run_options(args, resolve_mode(args))
+    assert opts.pretty is True
+    assert build_run_options(parse_args([]), "full").pretty is False

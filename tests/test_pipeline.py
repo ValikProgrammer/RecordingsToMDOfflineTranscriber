@@ -418,3 +418,33 @@ def test_stage_b_enrolls_named_speakers(tmp_path):
     store = VoiceprintStore(tmp_path / "systems" / "voiceprints")
     assert store.identify([1.0, 0.0, 0.0], threshold=0.7) == "Галя"
     assert store.identify([0.0, 1.0, 0.0], threshold=0.7) == "Иван"
+
+
+def test_pretty_flag_writes_pretty_file(tmp_path):
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, pretty_transcript=lambda doc, cfg, log: "PRETTY BODY")
+    task = _task(path=tmp_path / "team call.m4a")
+    task.path.write_bytes(b"x")
+
+    pipeline.run_all([task], RunOptions(mode="full", pretty=True), jobs=1)
+
+    out_path = Path(manifest.get(task.content_hash).out_path)
+    pretty_path = tmp_path / "out" / "pretty" / out_path.name
+    assert pretty_path.exists()
+    assert "PRETTY BODY" in pretty_path.read_text(encoding="utf-8")
+
+
+def test_no_pretty_flag_skips_pretty_file(tmp_path):
+    called = {"n": 0}
+
+    def spy(doc, cfg, log):
+        called["n"] += 1
+        return "x"
+
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, pretty_transcript=spy)
+    task = _task(path=tmp_path / "team call.m4a")
+    task.path.write_bytes(b"x")
+
+    pipeline.run_all([task], RunOptions(mode="full"), jobs=1)
+
+    assert called["n"] == 0
+    assert not (tmp_path / "out" / "pretty").exists()

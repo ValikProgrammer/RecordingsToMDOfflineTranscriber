@@ -28,6 +28,7 @@ from .manifest import Manifest
 from .models import FileTask, ManifestEntry, RawDoc
 from .stages import asr_mlx, audio as audio_stage, diarize as diarize_stage
 from .stages import merge as merge_stage
+from .stages import pretty as pretty_stage
 from .stages import render as render_stage
 from .stages import summarize as summarize_stage
 
@@ -46,6 +47,7 @@ class RunOptions:
     names: list[str] | None = None
     frontmatter: bool = True
     wikilink_speakers: bool = False
+    pretty: bool = False
 
 
 def utcnow_iso() -> str:
@@ -145,6 +147,7 @@ class Pipeline:
         merge=merge_stage.merge,
         summarize=summarize_stage.summarize,
         render_markdown=render_stage.render_markdown,
+        pretty_transcript=pretty_stage.render_pretty_transcript,
     ):
         self.cfg = cfg
         self.manifest = manifest
@@ -154,6 +157,7 @@ class Pipeline:
         self.merge = merge
         self.summarize = summarize
         self.render_markdown = render_markdown
+        self.pretty_transcript = pretty_transcript
 
     # --- shared helpers -------------------------------------------------
 
@@ -204,6 +208,13 @@ class Pipeline:
         out_path = self._resolve_out_path(task, day, title)
         atomic_write_text(out_path, md)
         log.info(f"rendered: {out_path}")
+
+        if opts.pretty:
+            pretty_body = self.pretty_transcript(doc, self.cfg, log)
+            pretty_path = Path(self.cfg.out_folder) / "pretty" / out_path.name
+            atomic_write_text(pretty_path, f"# {title}\n\n{pretty_body}\n")
+            log.info(f"pretty: {pretty_path}")
+
         return out_path, raw_path
 
     # --- fresh audio (--text / full) staged pipeline --------------------

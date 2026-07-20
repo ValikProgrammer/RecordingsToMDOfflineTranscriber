@@ -26,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--names", dest="names", default=None)
     parser.add_argument("--no-frontmatter", dest="no_frontmatter", action="store_true")
     parser.add_argument("--wikilink-speakers", dest="wikilink_speakers", action="store_true")
+    parser.add_argument("--pretty", dest="pretty", action="store_true")
     parser.add_argument("--llm-model", dest="llm_model", default=None)
     parser.add_argument("--language", dest="language", default=None)
     parser.add_argument("--enroll", dest="enroll", default=None, metavar="NAME")
@@ -92,4 +93,5 @@ def build_run_options(args: argparse.Namespace, mode: str) -> RunOptions:
         names=parse_names(args.names),
         frontmatter=not args.no_frontmatter,
         wikilink_speakers=args.wikilink_speakers,
+        pretty=args.pretty,
     )
