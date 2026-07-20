@@ -228,17 +228,27 @@ class Pipeline:
     def _safe_stage_b(self, ctx: _Ctx, opts: RunOptions) -> _Ctx | None:
         task, log = ctx.task, ctx.log
         try:
-            asr = self.transcribe(ctx.wav_path, opts.turbo, log)
+            lang = self.cfg.asr_language.strip()
+            language = None if lang.lower() in ("", "auto") else lang
+            prompt = asr_mlx.build_initial_prompt(self.cfg.asr_prompt_extra)
+
             if opts.mode == "text":
+                asr = self.transcribe(ctx.wav_path, opts.turbo, log, language=language, initial_prompt=prompt)
                 doc = merge_stage.build_text_doc(
                     asr, content_hash=task.content_hash, source_name=task.source_name,
                     source_path=str(task.path), duration_sec=ctx.duration,
                 )
             else:
-                diar = self.diarize(
-                    ctx.wav_path, self.cfg.diarize_device, opts.speakers,
-                    opts.min_speakers, opts.max_speakers, log,
-                )
+                # Best-effort overlap: run diarization on a worker thread while ASR
+                # runs here. Both read the same wav and are independent; merge waits
+                # for both. Quality is unaffected (same models, same params).
+                with ThreadPoolExecutor(max_workers=1) as diar_pool:
+                    diar_future = diar_pool.submit(
+                        self.diarize, ctx.wav_path, self.cfg.diarize_device,
+                        opts.speakers, opts.min_speakers, opts.max_speakers, log,
+                    )
+                    asr = self.transcribe(ctx.wav_path, opts.turbo, log, language=language, initial_prompt=prompt)
+                    diar = diar_future.result()
                 doc = self.merge(
                     asr, diar, self.cfg.mono_threshold, opts.names, log,
                     content_hash=task.content_hash, source_name=task.source_name,

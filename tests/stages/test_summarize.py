@@ -156,3 +156,13 @@ def test_summarize_long_transcript_triggers_map_reduce(monkeypatch):
     assert summary.title == "Final"
     assert summary.text == "Combined"
     assert len(calls) == 3  # 2 map chunks + 1 reduce
+
+
+def test_system_prompt_instructs_full_topic_coverage():
+    from transcriber.stages.summarize import SYSTEM_PROMPT_TEMPLATE
+
+    prompt = SYSTEM_PROMPT_TEMPLATE.format(language="ru", sentences="5-8", long_form_hint="")
+    lowered = prompt.lower()
+    assert "topic" in lowered
+    assert "distinct" in lowered
+    assert "do not limit" in lowered or "no limit" in lowered

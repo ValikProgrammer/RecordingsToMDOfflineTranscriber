@@ -19,6 +19,8 @@ Respond ONLY with a single JSON object, no prose, matching this schema:
 Write summary, topics, hashtags, key_topics, decisions in language code: {language}.
 Sentence-count guidance for "summary" (a guideline, NOT a hard rule — the number of
 distinct substantive topics should drive the actual length, don't pad to fit): {sentences}.
+Extract one "topics" entry per distinct subject discussed, in chronological order.
+Do not limit the number of topics — a long recording with many subjects should have many topics. Do not pad with trivial or duplicate topics.
 {long_form_hint}
 """
 
@@ -121,7 +123,9 @@ def _map_reduce(chunks: list[list[str]], cfg: Config, system_prompt: str, log: l
         partials.append(call_ollama_json(cfg.llm_model, system_prompt, "\n".join(chunk), log))
     reduce_prompt = (
         "Combine these partial summaries (JSON list below) into ONE final JSON object "
-        "with the same schema, deduplicating topics/hashtags:\n"
+        "with the same schema. Keep ALL distinct topics in chronological order; "
+        "merge only topics that are duplicates or clearly the same subject. "
+        "Do not drop distinct topics or cap their number:\n"
         + json.dumps(partials, ensure_ascii=False)
     )
     return call_ollama_json(cfg.llm_model, system_prompt, reduce_prompt, log)

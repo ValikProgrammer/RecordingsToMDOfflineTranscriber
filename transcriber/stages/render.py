@@ -81,10 +81,9 @@ def render_markdown(
         parts.append("")
 
         if doc.summary.topics:
-            topics_str = " · ".join(
-                f"{t.term} ({format_timecode(t.ts, use_hours)})" for t in doc.summary.topics
-            )
-            parts.append(f"**Topics:** {topics_str}")
+            parts.append("**Topics:**")
+            for t in doc.summary.topics:
+                parts.append(f"- [{format_timecode(t.ts, use_hours)}] {t.term}")
             parts.append("")
 
         if doc.summary.hashtags:

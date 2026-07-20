@@ -62,8 +62,21 @@ def test_render_dialogue_includes_frontmatter_and_speaker_labels():
     assert "tags: [budget, cyprus]" in md  # numeric "2026" hashtag dropped
     assert "**[00:00] Speaker 1:** Hi, how are you" in md
     assert "**[00:15] Speaker 2:** Good, and you" in md
-    assert "**Topics:** budget (00:12) · Cyprus (03:45)" in md
+    assert "**Topics:**\n- [00:12] budget\n- [03:45] Cyprus" in md
     assert "**Hashtags:** #budget #cyprus #2026" in md
+
+
+def test_topics_render_one_per_line_timecode_first():
+    topics = [TopicRef(term=f"Topic {i}", ts=float(i * 60)) for i in range(30)]
+    doc = _base_doc()
+    doc.summary.topics = topics
+    md = render_markdown(doc, "2026-07-12", "Long call")
+
+    assert "**Topics:**" in md
+    assert "- [00:00] Topic 0" in md
+    assert "- [29:00] Topic 29" in md
+    assert md.count("\n- [") >= 30
+    assert " · Topic" not in md
 
 
 def test_render_long_form_adds_key_topics_and_decisions_sections():
