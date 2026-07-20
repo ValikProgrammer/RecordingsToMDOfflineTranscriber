@@ -57,3 +57,19 @@ def test_cwd_config_toml_is_picked_up_when_no_explicit_path(tmp_path, monkeypatc
     (tmp_path / "config.toml").write_text('jobs = 9\n')
     cfg = load_config()
     assert cfg.jobs == 9
+
+
+def test_load_config_reads_asr_language_and_prompt_extra(tmp_path, monkeypatch):
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text('asr_language = "en"\nasr_prompt_extra = "ФизТех, Богодаров"\n')
+    monkeypatch.chdir(tmp_path)
+
+    cfg = load_config(None)
+
+    assert cfg.asr_language == "en"
+    assert cfg.asr_prompt_extra == "ФизТех, Богодаров"
+
+
+def test_config_defaults_asr_language_ru():
+    assert Config().asr_language == "ru"
+    assert Config().asr_prompt_extra == ""

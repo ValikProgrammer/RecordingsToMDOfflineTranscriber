@@ -3,6 +3,8 @@ out_folder   = "./out"
 systems_folder = "./systems"
 logs_folder  = "./logs"
 asr_model    = "large-v3"      # large-v3 | large-v3-turbo (see --turbo)
+asr_language = "ru"            # forced decode language; "" or "auto" = auto-detect
+asr_prompt_extra = ""          # extra terms/names added to the ASR glossary prompt, e.g. "ФизТех, Иван Богодаров"
 llm_model    = "qwen2.5:14b"
 llm_ctx      = 8192            # if the transcript is longer, map-reduce the summary
 diarize_device = "mps"         # mps | cpu
