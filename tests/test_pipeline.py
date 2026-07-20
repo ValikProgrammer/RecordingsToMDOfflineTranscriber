@@ -351,3 +351,24 @@ def test_stage_b_runs_diarize_concurrently_and_merges(tmp_path):
     assert both_running["ok"] is True
     entry = manifest.get(task.content_hash)
     assert entry.status == "done"
+
+
+def test_stage_b_filters_asr_artifacts(tmp_path):
+    def art_transcribe(wav, turbo, log, **kw):
+        return AsrResult(
+            language="ru", backend="mlx", model="large-v3", turbo=False,
+            segments=[
+                AsrSegment(0.0, 1.0, "Спасибо за просмотр!", words=[AsrWord("Спасибо", 0.0, 0.5), AsrWord("за", 0.5, 0.7), AsrWord("просмотр", 0.7, 1.0)]),
+                AsrSegment(1.0, 2.0, "реальный текст", words=[AsrWord("реальный", 1.0, 1.5), AsrWord("текст", 1.5, 2.0)]),
+            ],
+        )
+
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, transcribe=art_transcribe)
+    task = _task(path=tmp_path / "team call.m4a")
+    task.path.write_bytes(b"x")
+
+    pipeline.run_all([task], RunOptions(mode="full"), jobs=1)
+
+    md = Path(manifest.get(task.content_hash).out_path).read_text(encoding="utf-8")
+    assert "Спасибо за просмотр" not in md
+    assert "реальный текст" in md

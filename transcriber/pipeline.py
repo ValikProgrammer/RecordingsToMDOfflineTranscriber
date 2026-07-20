@@ -232,8 +232,15 @@ class Pipeline:
             language = None if lang.lower() in ("", "auto") else lang
             prompt = asr_mlx.build_initial_prompt(self.cfg.asr_prompt_extra)
 
+            def _run_asr():
+                result = self.transcribe(ctx.wav_path, opts.turbo, log, language=language, initial_prompt=prompt)
+                result.segments = asr_mlx.filter_artifact_segments(
+                    result.segments, self.cfg.asr_artifact_denylist_extra
+                )
+                return result
+
             if opts.mode == "text":
-                asr = self.transcribe(ctx.wav_path, opts.turbo, log, language=language, initial_prompt=prompt)
+                asr = _run_asr()
                 doc = merge_stage.build_text_doc(
                     asr, content_hash=task.content_hash, source_name=task.source_name,
                     source_path=str(task.path), duration_sec=ctx.duration,
@@ -247,7 +254,7 @@ class Pipeline:
                         self.diarize, ctx.wav_path, self.cfg.diarize_device,
                         opts.speakers, opts.min_speakers, opts.max_speakers, log,
                     )
-                    asr = self.transcribe(ctx.wav_path, opts.turbo, log, language=language, initial_prompt=prompt)
+                    asr = _run_asr()
                     diar = diar_future.result()
                 doc = self.merge(
                     asr, diar, self.cfg.mono_threshold, opts.names, log,
