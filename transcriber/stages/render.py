@@ -35,13 +35,14 @@ def speaker_display(speaker: str | None, order: list[str], wikilink: bool) -> st
 
 def _render_frontmatter(title: str, doc: RawDoc, day_str: str, duration_str: str, tags: list[str]) -> str:
     lines = ["---"]
-    lines.append(f"title: {yaml_escape(title)}")
-    lines.append(f"date: {day_str}")
-    lines.append(f"language: {doc.language.upper()}")
-    lines.append(f"speakers: {doc.num_speakers}")
-    lines.append(f"duration: {yaml_escape(duration_str)}")
-    lines.append(f"source_file: {yaml_escape(doc.source_name)}")
+    lines.append(f"Title: {yaml_escape(title)}")
+    lines.append(f"Date: {day_str}")
+    lines.append(f"Language: {doc.language.upper()}")
+    lines.append(f"Speakers: {doc.num_speakers}")
+    lines.append(f"Duration: {yaml_escape(duration_str)}")
+    lines.append(f"Source file: {yaml_escape(doc.source_name)}")
     if tags:
+        # `tags` stays lowercase: Obsidian only treats the lowercase key as real tags.
         lines.append(f"tags: [{', '.join(tags)}]")
     lines.append("---")
     return "\n".join(lines)
@@ -68,12 +69,15 @@ def render_markdown(
 
     parts.append(f"# {title}")
     parts.append("")
-    parts.append(
-        f"**Date:** {day_str}  ·  **Language:** {doc.language.upper()}  ·  "
-        f"**Speakers:** {doc.num_speakers}  ·  **Duration:** {duration_str}"
-    )
-    parts.append(f"**Source file:** `{doc.source_name}`")
-    parts.append("")
+    if not frontmatter:
+        # Only show metadata in the body when there's no frontmatter to hold it,
+        # so the two never duplicate each other.
+        parts.append(
+            f"**Date:** {day_str}  ·  **Language:** {doc.language.upper()}  ·  "
+            f"**Speakers:** {doc.num_speakers}  ·  **Duration:** {duration_str}"
+        )
+        parts.append(f"**Source file:** `{doc.source_name}`")
+        parts.append("")
 
     if doc.summary:
         parts.append("### Summary")
@@ -87,7 +91,8 @@ def render_markdown(
             parts.append("")
 
         if doc.summary.hashtags:
-            hashtags_str = " ".join(f"#{h}" for h in doc.summary.hashtags)
+            # values may already carry a leading '#'; strip it so we never emit '##'
+            hashtags_str = " ".join(f"#{h.lstrip('#')}" for h in doc.summary.hashtags)
             parts.append(f"**Hashtags:** {hashtags_str}")
             parts.append("")
 

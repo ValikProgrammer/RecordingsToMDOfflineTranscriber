@@ -53,13 +53,16 @@ def test_render_dialogue_includes_frontmatter_and_speaker_labels():
     doc = _base_doc()
     md = render_markdown(doc, "2026-07-12", "Call with Jamie")
     assert md.startswith("---\n")
-    assert 'title: "Call with Jamie"' in md
-    assert "date: 2026-07-12" in md
-    assert "language: RU" in md
-    assert "speakers: 2" in md
-    assert 'duration: "12:34"' in md
-    assert 'source_file: "team call.m4a"' in md
-    assert "tags: [budget, cyprus]" in md  # numeric "2026" hashtag dropped
+    assert 'Title: "Call with Jamie"' in md
+    assert "Date: 2026-07-12" in md
+    assert "Language: RU" in md
+    assert "Speakers: 2" in md
+    assert 'Duration: "12:34"' in md
+    assert 'Source file: "team call.m4a"' in md
+    assert "tags: [budget, cyprus]" in md  # numeric "2026" hashtag dropped; key stays lowercase for Obsidian
+    # body must NOT duplicate frontmatter metadata when frontmatter is on
+    assert "**Date:**" not in md
+    assert "**Source file:**" not in md
     assert "**[00:00] Speaker 1:** Hi, how are you" in md
     assert "**[00:15] Speaker 2:** Good, and you" in md
     assert "**Topics:**\n- [00:12] budget\n- [03:45] Cyprus" in md
@@ -135,7 +138,10 @@ def test_render_no_frontmatter_flag():
     doc = _base_doc()
     md = render_markdown(doc, "2026-07-12", "T", frontmatter=False)
     assert not md.startswith("---")
-    assert "title:" not in md
+    assert "Title:" not in md
+    # with frontmatter off, metadata falls back to the body block
+    assert "**Duration:**" in md
+    assert "**Source file:**" in md
 
 
 def test_render_text_mode_no_summary_omits_summary_block_and_tags():
@@ -149,5 +155,13 @@ def test_render_text_mode_no_summary_omits_summary_block_and_tags():
 def test_render_hour_plus_duration_uses_hhmmss_timecodes():
     doc = _base_doc(duration_sec=3700.0, segments=[Segment(3650.0, 3660.0, "SPEAKER_00", "text")])
     md = render_markdown(doc, "2026-07-12", "T")
-    assert "**Duration:** 01:01:40" in md
+    assert 'Duration: "01:01:40"' in md
     assert "**[01:00:50]" in md
+
+
+def test_hashtags_with_leading_hash_are_normalized_to_single():
+    doc = _base_doc()
+    doc.summary.hashtags = ["#хакатоны", "##расписание", "субботняя"]
+    md = render_markdown(doc, "2026-07-12", "T")
+    assert "**Hashtags:** #хакатоны #расписание #субботняя" in md
+    assert "##" not in md.split("**Hashtags:**")[1].split("\n")[0]
