@@ -95,11 +95,44 @@ Notable config keys (see `config.example.toml` for all): `asr_language`,
 low-speech speakers; `0` = off), `voiceprint_enabled` / `voiceprint_threshold`
 (auto-name speakers from the voice DB).
 
+## Trimming silence (preprocessing)
+
+`transcriber.trim` is a separate, **algorithmic** step (ffmpeg `silencedetect`,
+no LLM) for long recordings that are mostly silence. It never overwrites
+originals — trimmed copies go to a new folder, and you confirm the cuts before
+anything is written.
+
+```bash
+# 1. detect: scan the folder, write a reviewable plan
+python -m transcriber.trim --input-folder ./audio
+
+# 2. review/edit trim_plan.json: drop pairs, adjust timecodes, set "action": "skip"
+
+# 3. apply: cut the confirmed ranges into a new folder (originals untouched)
+python -m transcriber.trim --apply --out ./out/edited
+
+# then run the normal pipeline on the trimmed copies
+python -m transcriber --input-folder ./out/edited --out ./out --pretty
+```
+
+`trim_plan.json` lists, per file, `duration_sec`, `total_cut_sec`, an `action`
+(`trim`/`skip`), and `cuts` — `[start, end]` pairs (seconds) marking the
+regions to **remove**. Files whose total cut is below `--min-total` are marked
+`skip`. Tuning flags: `--noise-db` (silence loudness threshold, default `-30`),
+`--min-gap` (shortest silence worth cutting, default `20`s), `--min-total`
+(skip files with less total silence than this, default `60`s), `--plan` (plan
+path, default `trim_plan.json`).
+
+Note: cutting interior silence shifts the timeline, so transcript timecodes for
+edited files refer to the trimmed audio, not the original recording.
+
 ## Layout
 
 ```
 out/                    # .md only — this is a subfolder of the Obsidian vault
 out/pretty/             # LLM-cleaned readable transcripts (only with --pretty)
+out/edited/             # silence-trimmed audio copies (transcriber.trim --apply)
+trim_plan.json          # reviewable silence-cut plan (transcriber.trim)
 systems/raw/<hash>.json # raw transcript+diarization — source of truth
 systems/manifest.json   # processing status, dedup by content hash
 systems/voiceprints/    # enrolled voice embeddings, one JSON per name
