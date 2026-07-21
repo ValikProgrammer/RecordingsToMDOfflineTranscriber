@@ -93,8 +93,12 @@ Config is looked up at `./config.toml`, then
 `~/.config/transcriber/config.toml`; template at `config.example.toml`. CLI
 flags override the config.
 
-Notable config keys (see `config.example.toml` for all): `asr_language`,
-`asr_backend` (`mlx` | `faster-whisper`), `asr_prompt_extra` (inline glossary
+Notable config keys (see `config.example.toml` for all): `asr_language`
+(set `"auto"` to detect the language from sampled 30s windows at start/middle/end
+instead of trusting Whisper's first-30s guess — needs `faster-whisper`; a concrete
+value or `--language` skips detection), `lang_detect_min_prob` (per-window confidence
+floor so noise can't pick a weird language), `asr_backend` (`mlx` | `faster-whisper`),
+`asr_prompt_extra` (inline glossary
 terms/names to bias ASR), `asr_prompt_file` (path to a git-ignored glossary file,
 one term per line — keep personal names out of the repo), `asr_artifact_denylist_extra`
 (extra hallucination phrases to strip), `min_speaker_share` (fold phantom

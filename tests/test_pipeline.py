@@ -338,14 +338,19 @@ def test_stage_b_passes_language_and_prompt_from_config(tmp_path):
     assert "ФизТех" in captured["initial_prompt"]
 
 
-def test_stage_b_auto_language_passes_none(tmp_path):
+def test_stage_b_auto_language_uses_none_when_detector_undecided(tmp_path):
     captured = {}
 
     def spy_transcribe(wav, turbo, log, language=None, initial_prompt=None):
         captured["language"] = language
         return _fake_asr()
 
-    cfg, manifest, pipeline = _make_pipeline(tmp_path, transcribe=spy_transcribe)
+    def undecided_detect(wav, log, **kw):
+        return None  # bilingual/uncertain -> don't force, let the backend switch
+
+    cfg, manifest, pipeline = _make_pipeline(
+        tmp_path, transcribe=spy_transcribe, detect_language=undecided_detect
+    )
     cfg.asr_language = "auto"
     task = _task(path=tmp_path / "team call.m4a")
     task.path.write_bytes(b"x")
@@ -467,6 +472,48 @@ def test_pretty_flag_writes_pretty_file(tmp_path):
     assert "PRETTY BODY" in pretty
     # the verbatim segment dump is replaced, not appended alongside the pretty body
     assert "**[00:00]" not in pretty
+
+
+def test_auto_language_forces_detector_result(tmp_path):
+    captured = {}
+
+    def spy_transcribe(wav, turbo, log, **kw):
+        captured["language"] = kw.get("language")
+        return _fake_asr()
+
+    def fake_detect(wav, log, **kw):
+        captured["detect_called"] = True
+        return "en"
+
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, transcribe=spy_transcribe, detect_language=fake_detect)
+    cfg.asr_language = "auto"
+    task = _task(path=tmp_path / "call.m4a")
+    task.path.write_bytes(b"x")
+
+    pipeline.run_all([task], RunOptions(mode="text"), jobs=1)
+
+    assert captured["detect_called"] is True
+    assert captured["language"] == "en"  # detected language is forced on transcribe
+
+
+def test_forced_language_skips_detector(tmp_path):
+    captured = {}
+
+    def spy_transcribe(wav, turbo, log, **kw):
+        captured["language"] = kw.get("language")
+        return _fake_asr()
+
+    def boom_detect(wav, log, **kw):
+        raise AssertionError("detector must not run when language is forced")
+
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, transcribe=spy_transcribe, detect_language=boom_detect)
+    cfg.asr_language = "ru"
+    task = _task(path=tmp_path / "call.m4a")
+    task.path.write_bytes(b"x")
+
+    pipeline.run_all([task], RunOptions(mode="text"), jobs=1)
+
+    assert captured["language"] == "ru"
 
 
 def test_no_pretty_flag_skips_pretty_file(tmp_path):
