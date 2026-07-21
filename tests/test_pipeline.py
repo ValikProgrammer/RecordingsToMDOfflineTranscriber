@@ -47,6 +47,35 @@ def test_atomic_write_json_still_rejects_truly_unserializable(tmp_path):
         atomic_write_json(tmp_path / "raw.json", {"bad": object()})
 
 
+def test_atomic_write_json_leaves_no_temp_file_on_failure(tmp_path):
+    with pytest.raises(TypeError):
+        atomic_write_json(tmp_path / "raw.json", {"bad": object()})
+    # the per-call temp must be cleaned up, not left behind as .*.tmp
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_atomic_write_text_concurrent_same_path_never_interleaves(tmp_path):
+    from transcriber.pipeline import atomic_write_text
+
+    path = tmp_path / "out.md"
+    a, b = "A" * 50_000, "B" * 50_000
+    barrier = threading.Barrier(2)
+
+    def writer(text):
+        barrier.wait()
+        atomic_write_text(path, text)
+
+    threads = [threading.Thread(target=writer, args=(a,)), threading.Thread(target=writer, args=(b,))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # exactly one writer wins wholesale; bytes are never interleaved and the
+    # loser never crashes on a shared temp being replaced out from under it
+    assert path.read_text(encoding="utf-8") in (a, b)
+
+
 def _task(name="team call.m4a", content_hash="blake2b:aaa", status="to_do", path=None) -> FileTask:
     return FileTask(path=path or Path(f"/audio/{name}"), content_hash=content_hash, source_name=name, status=status, reason="")
 

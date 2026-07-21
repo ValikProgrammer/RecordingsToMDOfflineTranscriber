@@ -97,17 +97,23 @@ def build_output_filename(day: date, title: str) -> str:
 
 
 def resolve_collision(out_folder: Path, filename: str) -> Path:
-    """Return the first free path for `filename` in `out_folder`, appending ` (N)`."""
+    """Atomically reserve the first free path for `filename`, appending ` (N)`.
+
+    Creates the file as an empty placeholder (O_CREAT|O_EXCL) before returning,
+    so two concurrent callers can never be handed the same path — a plain
+    exists()-then-use check races and lets two recordings collide onto one file
+    (issue #17). The caller overwrites the placeholder via os.replace."""
+    out_folder.mkdir(parents=True, exist_ok=True)
     candidate = out_folder / filename
-    if not candidate.exists():
-        return candidate
     stem, suffix = candidate.stem, candidate.suffix
-    n = 2
+    n = 1
     while True:
-        candidate = out_folder / f"{stem} ({n}){suffix}"
-        if not candidate.exists():
+        try:
+            candidate.touch(exist_ok=False)  # O_CREAT|O_EXCL: reserve atomically
             return candidate
-        n += 1
+        except FileExistsError:
+            n += 1
+            candidate = out_folder / f"{stem} ({n}){suffix}"
 
 
 # --- Transliteration for per-file log slugs (§5.3 example: rabochaya-vstrecha) ---
