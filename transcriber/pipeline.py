@@ -28,6 +28,7 @@ from .manifest import Manifest
 from .models import FileTask, ManifestEntry, RawDoc
 from .progress import NullReporter
 from .stages import asr_mlx, audio as audio_stage, diarize as diarize_stage
+from .stages import langdetect as langdetect_stage
 from .stages import merge as merge_stage
 from .stages import pretty as pretty_stage
 from .stages import render as render_stage
@@ -147,6 +148,7 @@ class _Ctx:
     total: int = 0
     wav_path: Path | None = None
     duration: float = 0.0
+    language: str | None = None  # resolved in stage A: forced code, or detected, or None (auto)
     doc: RawDoc | None = None
 
 
@@ -158,6 +160,7 @@ class Pipeline:
         *,
         normalize=audio_stage.normalize,
         transcribe=asr_mlx.transcribe,
+        detect_language=langdetect_stage.detect_language,
         diarize=diarize_stage.diarize,
         merge=merge_stage.merge,
         summarize=summarize_stage.summarize,
@@ -170,6 +173,7 @@ class Pipeline:
         self.manifest = manifest
         self.normalize = normalize
         self.transcribe = transcribe
+        self.detect_language = detect_language
         self.diarize = diarize
         self.merge = merge
         self.summarize = summarize
@@ -260,6 +264,13 @@ class Pipeline:
             log.info(f"ffmpeg -> 16k mono wav, duration={duration:.1f}s")
             ctx.wav_path = wav_path
             ctx.duration = duration
+            # Resolve the decode language here in stage A (CPU): when auto, detection
+            # runs on this file while the GPU (stage B) transcribes an earlier one.
+            lang = self.cfg.asr_language.strip()
+            if lang.lower() in ("", "auto"):
+                ctx.language = self.detect_language(wav_path, log, min_prob=self.cfg.lang_detect_min_prob)
+            else:
+                ctx.language = lang
             return ctx
         except Exception as exc:  # noqa: BLE001 - graceful per-file failure (§15)
             self._fail(task, log_path, log, exc)
@@ -278,8 +289,7 @@ class Pipeline:
     def _safe_stage_b(self, ctx: _Ctx, opts: RunOptions) -> _Ctx | None:
         task, log = ctx.task, ctx.log
         try:
-            lang = self.cfg.asr_language.strip()
-            language = None if lang.lower() in ("", "auto") else lang
+            language = ctx.language  # resolved in stage A (forced code, detected, or None=auto)
             prompt = asr_mlx.build_initial_prompt(self.cfg.asr_prompt_extra)
 
             def _run_asr():
