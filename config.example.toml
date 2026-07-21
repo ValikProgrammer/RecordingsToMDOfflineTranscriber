@@ -16,6 +16,7 @@ voiceprint_threshold = 0.7     # cosine-similarity threshold for matching a voic
 jobs = 3                       # workers for CPU stages (ffmpeg/summary/render); the GPU stage is always 1
 obsidian_frontmatter = true    # add a YAML frontmatter (properties) block to the top of the .md
 wikilink_speakers = false      # render named speakers as [[Name]] (Obsidian graph/backlinks)
+progress_default_rtf = 0.6     # wall/audio seed for progress ETAs until the first file finishes (lower = faster machine)
 
 # --- Adaptive summary length (GUIDANCE, not a hard rule) ---
 # The model picks the actual length by number of substantive topics; the range below is just a duration-based hint.

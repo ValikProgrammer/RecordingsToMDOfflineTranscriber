@@ -26,6 +26,7 @@ from .config import Config
 from .logging_setup import per_file_log_path, setup_file_logger
 from .manifest import Manifest
 from .models import FileTask, ManifestEntry, RawDoc
+from .progress import NullReporter
 from .stages import asr_mlx, audio as audio_stage, diarize as diarize_stage
 from .stages import merge as merge_stage
 from .stages import pretty as pretty_stage
@@ -130,6 +131,8 @@ class _Ctx:
     log: logging.Logger
     log_path: Path
     started: float
+    idx: int = 0
+    total: int = 0
     wav_path: Path | None = None
     duration: float = 0.0
     doc: RawDoc | None = None
@@ -148,6 +151,8 @@ class Pipeline:
         summarize=summarize_stage.summarize,
         render_markdown=render_stage.render_markdown,
         pretty_transcript=pretty_stage.render_pretty_transcript,
+        reporter=None,
+        console_logs: bool = False,
     ):
         self.cfg = cfg
         self.manifest = manifest
@@ -158,6 +163,8 @@ class Pipeline:
         self.summarize = summarize
         self.render_markdown = render_markdown
         self.pretty_transcript = pretty_transcript
+        self.reporter = reporter if reporter is not None else NullReporter()
+        self.console_logs = console_logs
 
     # --- shared helpers -------------------------------------------------
 
@@ -175,6 +182,7 @@ class Pipeline:
 
     def _fail(self, task: FileTask, log_path: Path, log: logging.Logger, exc: Exception) -> None:
         log.info(f"FAILED: {exc}\n{traceback.format_exc()}")
+        self.reporter.file_failed(task.content_hash, exc)
         self.manifest.upsert(
             ManifestEntry(
                 content_hash=task.content_hash,
@@ -219,14 +227,16 @@ class Pipeline:
 
     # --- fresh audio (--text / full) staged pipeline --------------------
 
-    def _safe_stage_a(self, task: FileTask, tmp_root: Path) -> _Ctx | None:
+    def _safe_stage_a(self, task: FileTask, idx: int, total: int, tmp_root: Path) -> _Ctx | None:
         h8 = hash8(task.content_hash)
         log_path = per_file_log_path(Path(self.cfg.logs_folder), task.source_name, h8)
-        log = setup_file_logger(log_path)
+        log = setup_file_logger(log_path, console=self.console_logs)
         log.info(f"taken: {task.source_name} (hash {h8})")
         self._mark_in_progress(task.content_hash, task.source_name, log_path)
-        ctx = _Ctx(task=task, log=log, log_path=log_path, started=time.monotonic())
+        self.reporter.file_start(task.content_hash, idx, total, task.source_name, task.audio_sec)
+        ctx = _Ctx(task=task, log=log, log_path=log_path, started=time.monotonic(), idx=idx, total=total)
         try:
+            self.reporter.stage(task.content_hash, "FFMPEG", "normalizing")
             wav_path, duration = self.normalize(task.path, tmp_root)
             log.info(f"ffmpeg -> 16k mono wav, duration={duration:.1f}s")
             ctx.wav_path = wav_path
@@ -254,6 +264,7 @@ class Pipeline:
             prompt = asr_mlx.build_initial_prompt(self.cfg.asr_prompt_extra)
 
             def _run_asr():
+                self.reporter.stage(task.content_hash, "WHISPER", "transcribing")
                 result = self.transcribe(ctx.wav_path, opts.turbo, log, language=language, initial_prompt=prompt)
                 result.segments = asr_mlx.filter_artifact_segments(
                     result.segments, self.cfg.asr_artifact_denylist_extra
@@ -267,6 +278,7 @@ class Pipeline:
                     source_path=str(task.path), duration_sec=ctx.duration,
                 )
             else:
+                self.reporter.stage(task.content_hash, "DIARIZE", "diarizing")
                 # Best-effort overlap: run diarization on a worker thread while ASR
                 # runs here. Both read the same wav and are independent; merge waits
                 # for both. Quality is unaffected (same models, same params).
@@ -277,6 +289,7 @@ class Pipeline:
                     )
                     asr = _run_asr()
                     diar = diar_future.result()
+                self.reporter.stage(task.content_hash, "MERGE", "merging speakers")
                 doc = self.merge(
                     asr, diar, self.cfg.mono_threshold, opts.names, log,
                     content_hash=task.content_hash, source_name=task.source_name,
@@ -284,6 +297,7 @@ class Pipeline:
                     min_speaker_share=self.cfg.min_speaker_share,
                 )
                 if self.cfg.voiceprint_enabled:
+                    self.reporter.stage(task.content_hash, "VOICEID", "matching voices")
                     self._apply_voiceprints(doc, log)
             ctx.doc = doc
             log.info(f"ASR done: language={doc.language}, segments={len(doc.segments)}")
@@ -296,7 +310,9 @@ class Pipeline:
         task, log = ctx.task, ctx.log
         try:
             if opts.mode == "full":
+                self.reporter.stage(task.content_hash, "SUMMARY", "summarizing")
                 ctx.doc.summary = self.summarize(ctx.doc, self.cfg, log)
+            self.reporter.stage(task.content_hash, "RENDER", "rendering")
             out_path, raw_path = self._write_outputs(ctx.doc, task, opts, log)
             elapsed = time.monotonic() - ctx.started
             self.manifest.upsert(
@@ -308,6 +324,7 @@ class Pipeline:
                 )
             )
             log.info(f"done (elapsed={elapsed:.1f}s)")
+            self.reporter.file_done(task.content_hash, elapsed, out_path)
         except Exception as exc:  # noqa: BLE001
             self._fail(task, ctx.log_path, log, exc)
 
@@ -319,9 +336,15 @@ class Pipeline:
         stage_a_out: queue.Queue = queue.Queue(maxsize=max(1, jobs))
         stage_b_out: queue.Queue = queue.Queue(maxsize=2)
 
+        total = len(tasks)
+
         def worker_a() -> None:
             with ThreadPoolExecutor(max_workers=jobs) as pool:
-                for fut in [pool.submit(self._safe_stage_a, t, tmp_root) for t in tasks]:
+                submitted = [
+                    pool.submit(self._safe_stage_a, t, i, total, tmp_root)
+                    for i, t in enumerate(tasks, start=1)
+                ]
+                for fut in submitted:
                     ctx = fut.result()
                     if ctx is not None:
                         stage_a_out.put(ctx)
@@ -357,22 +380,26 @@ class Pipeline:
 
     # --- existing raw JSON (--summary / --resummarize / --rerender) -----
 
-    def process_existing_raw(self, raw_path: Path, opts: RunOptions) -> None:
+    def process_existing_raw(self, raw_path: Path, opts: RunOptions, idx: int = 1, total: int = 1) -> None:
         doc = load_raw_doc(raw_path)
         h8 = hash8(doc.content_hash)
         log_path = per_file_log_path(Path(self.cfg.logs_folder), doc.source_name, h8)
-        log = setup_file_logger(log_path)
+        log = setup_file_logger(log_path, console=self.console_logs)
         log.info(f"taken: {doc.source_name} (hash {h8}) mode={opts.mode}")
         started = time.monotonic()
         task = FileTask(
             path=Path(doc.source_path), content_hash=doc.content_hash,
             source_name=doc.source_name, status="redo", reason=opts.mode,
+            audio_sec=doc.duration_sec,
         )
         self._mark_in_progress(doc.content_hash, doc.source_name, log_path)
+        self.reporter.file_start(doc.content_hash, idx, total, doc.source_name, doc.duration_sec)
         try:
             if opts.mode != "rerender":
+                self.reporter.stage(doc.content_hash, "SUMMARY", "summarizing")
                 doc.summary = self.summarize(doc, self.cfg, log)
                 atomic_write_json(raw_path, doc.to_dict())
+            self.reporter.stage(doc.content_hash, "RENDER", "rendering")
             out_path, raw_path_out = self._write_outputs(doc, task, opts, log)
             elapsed = time.monotonic() - started
             self.manifest.upsert(
@@ -384,11 +411,14 @@ class Pipeline:
                 )
             )
             log.info(f"done (elapsed={elapsed:.1f}s)")
+            self.reporter.file_done(doc.content_hash, elapsed, out_path)
         except Exception as exc:  # noqa: BLE001
             self._fail(task, log_path, log, exc)
 
     def run_existing(self, raw_paths: list[Path], opts: RunOptions, jobs: int) -> None:
         if not raw_paths:
             return
+        total = len(raw_paths)
+        indexed = list(enumerate(raw_paths, start=1))
         with ThreadPoolExecutor(max_workers=jobs) as pool:
-            list(pool.map(lambda p: self.process_existing_raw(p, opts), raw_paths))
+            list(pool.map(lambda it: self.process_existing_raw(it[1], opts, it[0], total), indexed))

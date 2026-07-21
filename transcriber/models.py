@@ -225,6 +225,7 @@ class FileTask:
     source_name: str
     status: str  # "to_do" | "skip" | "redo"
     reason: str
+    audio_sec: float = 0.0  # ffprobe'd up front to size the progress bar (0 = unknown)
 
 
 @dataclass
