@@ -55,6 +55,39 @@ def test_apply_overrides_leaves_defaults_when_flags_absent():
     assert cfg == Config()
 
 
+def test_apply_overrides_sets_systems_folder_and_backend():
+    cfg = apply_overrides(
+        Config(), parse_args([
+            "--systems-folder", "./cmp/cpu/systems", "--logs-folder", "./cmp/cpu/logs",
+            "--backend", "faster-whisper",
+        ])
+    )
+    assert cfg.systems_folder == "./cmp/cpu/systems"
+    assert cfg.logs_folder == "./cmp/cpu/logs"
+    assert cfg.asr_backend == "faster-whisper"
+
+
+def test_beam_defaults_to_5():
+    assert parse_args([]).beam == 5
+    assert parse_args(["--beam", "1"]).beam == 1
+
+
+def test_select_transcribe_picks_backend():
+    from functools import partial
+
+    from transcriber.__main__ import _select_transcribe
+    from transcriber.stages import asr_mlx
+
+    mlx_fn, mlx_msg = _select_transcribe(Config(asr_backend="mlx"), parse_args([]))
+    assert mlx_fn is asr_mlx.transcribe
+    assert "mlx" in mlx_msg
+
+    fw_fn, fw_msg = _select_transcribe(Config(asr_backend="faster-whisper"), parse_args(["--beam", "3"]))
+    assert isinstance(fw_fn, partial)
+    assert fw_fn.keywords["beam_size"] == 3
+    assert "faster-whisper" in fw_msg
+
+
 def test_build_run_options_maps_flags():
     args = parse_args([
         "--only", "a", "--skip", "b.m4a", "--turbo", "--speakers", "2",

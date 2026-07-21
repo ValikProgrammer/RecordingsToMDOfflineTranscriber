@@ -3,6 +3,7 @@ out_folder   = "./out"
 systems_folder = "./systems"
 logs_folder  = "./logs"
 asr_model    = "large-v3"      # large-v3 | large-v3-turbo (see --turbo)
+asr_backend  = "mlx"           # mlx (Metal/GPU) | faster-whisper (CTranslate2/CPU, supports --beam)
 asr_language = "ru"            # forced decode language; "" or "auto" = auto-detect
 asr_prompt_extra = ""          # inline extra terms/names for the ASR glossary prompt, e.g. "ФизТех, Иван Богодаров"
 asr_prompt_file  = ""          # path to a git-ignored glossary file (one term per line), merged into asr_prompt_extra

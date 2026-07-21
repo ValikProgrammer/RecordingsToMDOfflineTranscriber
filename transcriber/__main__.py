@@ -93,12 +93,26 @@ def _raw_duration(raw_path: Path) -> float:
         return 0.0
 
 
+def _select_transcribe(cfg: Config, args):
+    """Pick the ASR backend callable, matching asr_mlx.transcribe's interface."""
+    if cfg.asr_backend == "faster-whisper":
+        from functools import partial
+
+        from .stages import asr_faster
+        log_msg = f"ASR backend: faster-whisper (CPU), beam={args.beam}"
+        return partial(asr_faster.transcribe, beam_size=args.beam), log_msg
+    from .stages import asr_mlx
+    return asr_mlx.transcribe, "ASR backend: mlx (Metal/GPU)"
+
+
 def cmd_run(cfg: Config, args, log) -> int:
     manifest = Manifest(Path(cfg.systems_folder) / "manifest.json")
     mode = resolve_mode(args)
     opts = build_run_options(args, mode)
     reporter = make_reporter(enabled=not args.no_progress, default_rtf=cfg.progress_default_rtf)
-    pipeline = Pipeline(cfg, manifest, reporter=reporter, console_logs=True)
+    transcribe, backend_msg = _select_transcribe(cfg, args)
+    log.info(backend_msg)
+    pipeline = Pipeline(cfg, manifest, transcribe=transcribe, reporter=reporter, console_logs=True)
 
     try:
         if mode in ("full", "text"):

@@ -62,7 +62,11 @@ python -m transcriber --retry-failed
 |---|---|
 | `--input-folder` / `--folder` / `--input` | audio folder |
 | `--out` | output folder (default `./out`) |
+| `--systems-folder` | state folder (manifest/raw), default `./systems` |
+| `--logs-folder` | logs folder, default `./logs` |
 | `--config` | path to `config.toml` |
+| `--backend mlx\|faster-whisper` | ASR backend (default `mlx`, Metal/GPU) |
+| `--beam N` | beam size for `faster-whisper` (default 5) |
 | `--only NAME` | process a single file |
 | `--skip NAME...` / `--exclude` | skip the given files |
 | `--transcribe` / `--text` | transcript only |
@@ -90,10 +94,43 @@ Config is looked up at `./config.toml`, then
 flags override the config.
 
 Notable config keys (see `config.example.toml` for all): `asr_language`,
-`asr_prompt_extra` (glossary terms/names to bias ASR), `asr_artifact_denylist_extra`
+`asr_backend` (`mlx` | `faster-whisper`), `asr_prompt_extra` (inline glossary
+terms/names to bias ASR), `asr_prompt_file` (path to a git-ignored glossary file,
+one term per line — keep personal names out of the repo), `asr_artifact_denylist_extra`
 (extra hallucination phrases to strip), `min_speaker_share` (fold phantom
 low-speech speakers; `0` = off), `voiceprint_enabled` / `voiceprint_threshold`
 (auto-name speakers from the voice DB).
+
+## Comparing ASR backends (CPU vs GPU)
+
+Two ASR backends are available: `mlx` (default, Metal/GPU, greedy decode) and
+`faster-whisper` (CTranslate2, CPU, supports beam search). To A/B the transcript
+quality on the same files, run each into its **own** `--out`/`--systems-folder`/
+`--logs-folder` so their manifests and outputs never collide, then diff the results.
+Both use `--text` (transcript only — no diarization, no LLM), and since they use
+different compute units (Metal vs CPU) they can run **at the same time**:
+
+```bash
+pip install faster-whisper   # one-time; also downloads the CT2 large-v3 model on first run
+
+# GPU (mlx, default) — Metal
+python -m transcriber --text --backend mlx \
+  --input-folder ./cmp/audio --out ./cmp/gpu/out \
+  --systems-folder ./cmp/gpu/systems --logs-folder ./cmp/gpu/logs
+
+# CPU (faster-whisper, beam search) — run in a second terminal, in parallel
+python -m transcriber --text --backend faster-whisper --beam 5 \
+  --input-folder ./cmp/audio --out ./cmp/cpu/out \
+  --systems-folder ./cmp/cpu/systems --logs-folder ./cmp/cpu/logs
+
+# then compare
+diff -u ./cmp/gpu/out/*.md ./cmp/cpu/out/*.md
+```
+
+`faster-whisper` on a Mac runs on CPU (no Metal backend in CTranslate2), so it is
+several times slower than `mlx` — fine for an unattended/overnight run. The model
+is still `large-v3`; beam search mainly refines word choices on ambiguous audio and
+tightens timing, so proper-noun accuracy still comes from the glossary, not the backend.
 
 ## Trimming silence (preprocessing)
 
