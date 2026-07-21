@@ -99,20 +99,32 @@ def _json_default(obj):
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
-def atomic_write_json(path: Path, data: dict) -> None:
+def _atomic_write(path: Path, write: "Callable[[object], None]") -> None:
+    """Write via a per-call unique temp file, then os.replace onto `path`.
+
+    The temp name MUST be unique per writer: a deterministic `path + ".tmp"`
+    lets two threads writing the same target open the same tmp in "w" mode and
+    interleave their bytes into one corrupt file (see issue #17). mkstemp gives
+    each writer its own tmp in the destination dir (same filesystem, so replace
+    stays atomic)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2, default=_json_default)
-    os.replace(tmp, path)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            write(f)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def atomic_write_json(path: Path, data: dict) -> None:
+    _atomic_write(path, lambda f: json.dump(data, f, ensure_ascii=False, indent=2, default=_json_default))
 
 
 def atomic_write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-    os.replace(tmp, path)
+    _atomic_write(path, lambda f: f.write(text))
 
 
 def load_raw_doc(raw_path: Path) -> RawDoc:

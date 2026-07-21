@@ -121,6 +121,35 @@ def test_resolve_collision_appends_incrementing_suffix(tmp_path):
     assert result == tmp_path / "note (3).md"
 
 
+def test_resolve_collision_reserves_the_path(tmp_path):
+    # reservation is what makes it race-safe: the returned path must now exist
+    result = naming.resolve_collision(tmp_path, "note.md")
+    assert result.exists()
+
+
+def test_resolve_collision_hands_out_unique_paths_under_concurrency(tmp_path):
+    import threading
+
+    results: list[Path] = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(20)
+
+    def grab():
+        barrier.wait()  # maximize overlap on the check-then-create window
+        p = naming.resolve_collision(tmp_path, "note.md")
+        with lock:
+            results.append(p)
+
+    threads = [threading.Thread(target=grab) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(results) == 20
+    assert len(set(results)) == 20  # no two callers got the same path
+
+
 def test_transliterate_ru_matches_spec_example():
     assert naming.transliterate_ru("рабочая встреча") == "rabochaya vstrecha"
 
