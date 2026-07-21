@@ -56,6 +56,7 @@ def render_markdown(
     frontmatter: bool = True,
     wikilink_speakers: bool = False,
     long_form_from_min: float = 45,
+    transcript_override: str | None = None,
 ) -> str:
     use_hours = doc.duration_sec >= 3600
     duration_str = format_timecode(doc.duration_sec, use_hours)
@@ -111,12 +112,17 @@ def render_markdown(
     parts.append("---")
     parts.append("")
     parts.append("### Transcript")
-    for seg in doc.segments:
-        ts = format_timecode(seg.start, use_hours)
-        label = speaker_display(seg.speaker, order, wikilink_speakers)
-        if label is None:
-            parts.append(f"**[{ts}]** {seg.text}")
-        else:
-            parts.append(f"**[{ts}] {label}:** {seg.text}")
+    if transcript_override is not None:
+        # Pretty mode: the readable, LLM-rewritten transcript replaces the
+        # verbatim segment dump. It already carries its own [MM:SS] headings.
+        parts.append(transcript_override)
+    else:
+        for seg in doc.segments:
+            ts = format_timecode(seg.start, use_hours)
+            label = speaker_display(seg.speaker, order, wikilink_speakers)
+            if label is None:
+                parts.append(f"**[{ts}]** {seg.text}")
+            else:
+                parts.append(f"**[{ts}] {label}:** {seg.text}")
 
     return "\n".join(parts) + "\n"

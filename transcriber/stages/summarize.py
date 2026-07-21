@@ -17,6 +17,10 @@ Respond ONLY with a single JSON object, no prose, matching this schema:
 "hashtags": [str], "key_topics": [{{"topic": str, "ts_hint": "MM:SS", "note": str}}],
 "decisions": [{{"text": str, "ts_hint": "MM:SS"}}]}}
 Write summary, topics, hashtags, key_topics, decisions in language code: {language}.
+Write "summary" in a neutral, impersonal voice. Name the subjects rather than the people:
+prefer passive/topic phrasing
+over active phrasing with a vague actor. Never invent a
+speaker's name or refer to "the speakers"/"собеседники" as the grammatical subject.
 Sentence-count guidance for "summary" (a guideline, NOT a hard rule — the number of
 distinct substantive topics should drive the actual length, don't pad to fit): {sentences}.
 Extract one "topics" entry per distinct subject discussed, in chronological order.

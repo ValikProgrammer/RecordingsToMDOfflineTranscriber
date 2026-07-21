@@ -459,7 +459,14 @@ def test_pretty_flag_writes_pretty_file(tmp_path):
     out_path = Path(manifest.get(task.content_hash).out_path)
     pretty_path = tmp_path / "out" / "pretty" / out_path.name
     assert pretty_path.exists()
-    assert "PRETTY BODY" in pretty_path.read_text(encoding="utf-8")
+    pretty = pretty_path.read_text(encoding="utf-8")
+    # pretty is now a full document: frontmatter + summary + the rewritten transcript
+    assert pretty.startswith("---\n")
+    assert "### Summary" in pretty
+    assert "### Transcript" in pretty
+    assert "PRETTY BODY" in pretty
+    # the verbatim segment dump is replaced, not appended alongside the pretty body
+    assert "**[00:00]" not in pretty
 
 
 def test_no_pretty_flag_skips_pretty_file(tmp_path):
