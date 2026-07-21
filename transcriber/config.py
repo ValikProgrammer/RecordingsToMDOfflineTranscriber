@@ -18,6 +18,7 @@ _SIMPLE_KEYS = (
     "llm_model", "llm_ctx", "diarize_device",
     "mono_threshold", "min_speaker_share", "voiceprint_enabled", "voiceprint_threshold",
     "jobs", "obsidian_frontmatter", "wikilink_speakers",
+    "progress_default_rtf",
 )
 
 
@@ -58,6 +59,7 @@ class Config:
     wikilink_speakers: bool = False
     summary_tiers: list[SummaryTier] = field(default_factory=_default_tiers)
     long_form_from_min: float = 45
+    progress_default_rtf: float = 0.6  # wall/audio seed for ETAs until the first file finishes
 
 
 def find_config_path(explicit: str | None) -> Path | None:

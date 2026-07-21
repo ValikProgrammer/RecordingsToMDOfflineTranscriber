@@ -11,8 +11,23 @@ from .config import Config, load_config
 from .logging_setup import setup_run_logger
 from .manifest import Manifest
 from .pipeline import Pipeline, filter_tasks, list_raw_files
-from .stages.audio import FfmpegNotFoundError, check_ffmpeg_available, normalize
+from .progress import make_reporter
+from .stages.audio import FfmpegNotFoundError, check_ffmpeg_available, normalize, probe_duration
 from .stages.ingest import scan_and_hash
+
+
+def probe_total_audio(tasks, log) -> float:
+    """ffprobe each source up front to size the progress bar. A probe failure
+    leaves that file's duration at 0 (it just won't advance the bar)."""
+    total = 0.0
+    for task in tasks:
+        try:
+            task.audio_sec = probe_duration(Path(task.path))
+        except Exception as exc:  # noqa: BLE001 - non-fatal, bar just won't count it
+            log.info(f"duration probe failed for {task.source_name}: {exc}")
+            task.audio_sec = 0.0
+        total += task.audio_sec
+    return total
 
 
 def cmd_warmup(cfg: Config, log) -> int:
@@ -68,23 +83,43 @@ def cmd_dry_run(cfg: Config, args) -> int:
     return 0
 
 
+def _raw_duration(raw_path: Path) -> float:
+    try:
+        import json
+
+        with open(raw_path, "r", encoding="utf-8") as f:
+            return float(json.load(f).get("duration_sec", 0.0))
+    except Exception:  # noqa: BLE001 - missing/corrupt raw just doesn't size the bar
+        return 0.0
+
+
 def cmd_run(cfg: Config, args, log) -> int:
     manifest = Manifest(Path(cfg.systems_folder) / "manifest.json")
     mode = resolve_mode(args)
     opts = build_run_options(args, mode)
-    pipeline = Pipeline(cfg, manifest)
+    reporter = make_reporter(enabled=not args.no_progress, default_rtf=cfg.progress_default_rtf)
+    pipeline = Pipeline(cfg, manifest, reporter=reporter, console_logs=True)
 
-    if mode in ("full", "text"):
-        tasks = scan_and_hash(Path(cfg.input_folder), manifest, retry_failed=args.retry_failed)
-        tasks = filter_tasks(tasks, opts.only, opts.skip)
-        log.info(f"{len(tasks)} files to process (mode={mode})")
-        pipeline.run_all(tasks, opts, jobs=cfg.jobs)
-    else:  # summary | resummarize | rerender
-        raw_paths = list_raw_files(Path(cfg.systems_folder))
-        if opts.only:
-            raw_paths = [p for p in raw_paths if opts.only in p.stem]
-        log.info(f"{len(raw_paths)} raw files to process (mode={mode})")
-        pipeline.run_existing(raw_paths, opts, jobs=cfg.jobs)
+    try:
+        if mode in ("full", "text"):
+            tasks = scan_and_hash(Path(cfg.input_folder), manifest, retry_failed=args.retry_failed)
+            tasks = filter_tasks(tasks, opts.only, opts.skip)
+            log.info(f"{len(tasks)} files to process (mode={mode})")
+            total_audio = probe_total_audio(tasks, log)
+            reporter.start_batch(total_audio, len(tasks))
+            if tasks:
+                log.info("preparing models (first run may download several GB)…")
+            pipeline.run_all(tasks, opts, jobs=cfg.jobs)
+        else:  # summary | resummarize | rerender
+            raw_paths = list_raw_files(Path(cfg.systems_folder))
+            if opts.only:
+                raw_paths = [p for p in raw_paths if opts.only in p.stem]
+            log.info(f"{len(raw_paths)} raw files to process (mode={mode})")
+            total_audio = sum(_raw_duration(p) for p in raw_paths)
+            reporter.start_batch(total_audio, len(raw_paths))
+            pipeline.run_existing(raw_paths, opts, jobs=cfg.jobs)
+    finally:
+        reporter.close()
     return 0
 
 
@@ -124,7 +159,24 @@ def cmd_enroll(cfg: Config, args, log) -> int:
     return 0 if enrolled else 1
 
 
+def _silence_hf_download_bars() -> None:
+    """Kill HuggingFace-hub's own tqdm download/reconstruct bars — noise here, and
+    they collide with our progress bars (they even show 0.00B when models are
+    cached). Must run before mlx-whisper / pyannote import hf. Our own one-line
+    'preparing models' heads-up covers a genuine first-run download."""
+    import os
+
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    try:
+        from huggingface_hub.utils import disable_progress_bars
+
+        disable_progress_bars()
+    except Exception:  # noqa: BLE001 - best-effort; env var already set
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _silence_hf_download_bars()
     # Load HF_TOKEN (and any other vars) from a .env in the working directory so
     # `python -m transcriber` just works after activating the venv, without needing
     # to `source .env` manually. Existing environment variables take precedence.

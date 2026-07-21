@@ -34,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--diarize-device", dest="diarize_device", choices=["mps", "cpu"], default=None)
     parser.add_argument("--dry-run", dest="dry_run", action="store_true")
     parser.add_argument("--warmup", dest="warmup", action="store_true")
+    parser.add_argument("--no-progress", dest="no_progress", action="store_true")
     parser.add_argument("-v", "--verbose", dest="verbose", action="store_true")
     return parser
 
