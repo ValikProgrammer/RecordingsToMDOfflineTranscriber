@@ -11,7 +11,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="transcriber", description="Offline transcription + summary pipeline")
     parser.add_argument("--input-folder", "--folder", "--input", dest="input_folder", default=None)
     parser.add_argument("--out", dest="out_folder", default=None)
+    parser.add_argument("--systems-folder", dest="systems_folder", default=None)
+    parser.add_argument("--logs-folder", dest="logs_folder", default=None)
     parser.add_argument("--config", dest="config_path", default=None)
+    parser.add_argument("--backend", dest="asr_backend", choices=["mlx", "faster-whisper"], default=None)
+    parser.add_argument("--beam", dest="beam", type=int, default=5)
     parser.add_argument("--only", dest="only", default=None)
     parser.add_argument("--skip", "--exclude", dest="skip", nargs="+", default=None)
     parser.add_argument("--transcribe", "--text", dest="text_mode", action="store_true")
@@ -67,6 +71,12 @@ def apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
         cfg.input_folder = args.input_folder
     if args.out_folder is not None:
         cfg.out_folder = args.out_folder
+    if args.systems_folder is not None:
+        cfg.systems_folder = args.systems_folder
+    if args.logs_folder is not None:
+        cfg.logs_folder = args.logs_folder
+    if args.asr_backend is not None:
+        cfg.asr_backend = args.asr_backend
     if args.llm_model is not None:
         cfg.llm_model = args.llm_model
     if args.jobs is not None:

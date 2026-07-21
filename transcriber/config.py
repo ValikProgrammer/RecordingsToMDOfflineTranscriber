@@ -14,7 +14,7 @@ USER_CONFIG_PATH = Path.home() / ".config" / "transcriber" / "config.toml"
 
 _SIMPLE_KEYS = (
     "input_folder", "out_folder", "systems_folder", "logs_folder",
-    "asr_model", "asr_language", "asr_prompt_extra", "asr_artifact_denylist_extra",
+    "asr_model", "asr_backend", "asr_language", "asr_prompt_extra", "asr_prompt_file", "asr_artifact_denylist_extra",
     "llm_model", "llm_ctx", "diarize_device",
     "mono_threshold", "min_speaker_share", "voiceprint_enabled", "voiceprint_threshold",
     "jobs", "obsidian_frontmatter", "wikilink_speakers",
@@ -44,8 +44,10 @@ class Config:
     systems_folder: str = "./systems"
     logs_folder: str = "./logs"
     asr_model: str = "large-v3"
+    asr_backend: str = "mlx"  # mlx (Metal/GPU) | faster-whisper (CTranslate2/CPU, supports --beam)
     asr_language: str = "ru"
     asr_prompt_extra: str = ""
+    asr_prompt_file: str = ""  # path to a (git-ignored) glossary file, one term per line; merged into asr_prompt_extra
     asr_artifact_denylist_extra: list[str] = field(default_factory=list)
     llm_model: str = "qwen2.5:14b"
     llm_ctx: int = 8192
@@ -82,7 +84,36 @@ def load_config(explicit_path: str | None = None) -> Config:
     with open(path, "rb") as f:
         data = tomllib.load(f)
     _apply_toml(cfg, data)
+    _merge_prompt_file(cfg)
     return cfg
+
+
+def parse_prompt_file(text: str) -> list[str]:
+    """One term per line; blank lines and '#' comments ignored, inline '#' trimmed."""
+    terms: list[str] = []
+    for line in text.splitlines():
+        term = line.split("#", 1)[0].strip()
+        if term:
+            terms.append(term)
+    return terms
+
+
+def _merge_prompt_file(cfg: Config) -> None:
+    """Append terms from asr_prompt_file (if set and present) to asr_prompt_extra.
+
+    Keeps personal names/jargon out of the committed config: point asr_prompt_file
+    at a git-ignored file. A missing file is a no-op (the glossary is optional)."""
+    if not cfg.asr_prompt_file:
+        return
+    path = Path(cfg.asr_prompt_file)
+    if not path.exists():
+        return
+    terms = parse_prompt_file(path.read_text(encoding="utf-8"))
+    if not terms:
+        return
+    file_extra = ", ".join(terms)
+    inline = cfg.asr_prompt_extra.strip().rstrip(",").strip()
+    cfg.asr_prompt_extra = f"{inline}, {file_extra}" if inline else file_extra
 
 
 def _apply_toml(cfg: Config, data: dict) -> None:
