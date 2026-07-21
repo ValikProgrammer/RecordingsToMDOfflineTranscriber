@@ -161,8 +161,33 @@ def test_summarize_long_transcript_triggers_map_reduce(monkeypatch):
 def test_system_prompt_instructs_full_topic_coverage():
     from transcriber.stages.summarize import SYSTEM_PROMPT_TEMPLATE
 
-    prompt = SYSTEM_PROMPT_TEMPLATE.format(language="ru", sentences="5-8", long_form_hint="")
+    prompt = SYSTEM_PROMPT_TEMPLATE.format(
+        language="ru", sentences="5-8", long_form_hint="", voice_hint=""
+    )
     lowered = prompt.lower()
     assert "topic" in lowered
     assert "distinct" in lowered
     assert "do not limit" in lowered or "no limit" in lowered
+
+
+def test_summarize_selects_voice_hint_by_monologue(monkeypatch):
+    import transcriber.stages.summarize as S
+    from transcriber.config import Config
+
+    captured = {}
+
+    def fake_call(model, system_prompt, user_prompt, log):
+        captured["prompt"] = system_prompt
+        return {"title": "t", "summary": "s", "topics": [], "hashtags": []}
+
+    monkeypatch.setattr(S, "call_ollama_json", fake_call)
+
+    mono = _doc()
+    mono.is_monologue = True
+    S.summarize(mono, Config(), logging.getLogger("t"))
+    assert "single-speaker" in captured["prompt"]
+
+    dia = _doc()
+    dia.is_monologue = False
+    S.summarize(dia, Config(), logging.getLogger("t"))
+    assert "conversation" in captured["prompt"]

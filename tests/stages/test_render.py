@@ -69,6 +69,21 @@ def test_render_dialogue_includes_frontmatter_and_speaker_labels():
     assert "**Hashtags:** #budget #cyprus #2026" in md
 
 
+def test_transcript_override_replaces_verbatim_segments():
+    doc = _base_doc()
+    md = render_markdown(
+        doc, "2026-07-12", "Call with Jamie",
+        transcript_override="[00:00] Причёсанный текст блока.",
+    )
+    # keeps the frontmatter + summary scaffolding
+    assert md.startswith("---\n")
+    assert "### Summary" in md
+    assert "### Transcript" in md
+    # the override body appears; the verbatim per-segment lines do not
+    assert "[00:00] Причёсанный текст блока." in md
+    assert "**[00:00] Speaker 1:** Hi, how are you" not in md
+
+
 def test_topics_render_one_per_line_timecode_first():
     topics = [TopicRef(term=f"Topic {i}", ts=float(i * 60)) for i in range(30)]
     doc = _base_doc()

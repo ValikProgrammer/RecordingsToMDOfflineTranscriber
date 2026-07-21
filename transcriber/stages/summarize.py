@@ -17,12 +17,28 @@ Respond ONLY with a single JSON object, no prose, matching this schema:
 "hashtags": [str], "key_topics": [{{"topic": str, "ts_hint": "MM:SS", "note": str}}],
 "decisions": [{{"text": str, "ts_hint": "MM:SS"}}]}}
 Write summary, topics, hashtags, key_topics, decisions in language code: {language}.
+Write "summary" in a neutral, impersonal voice that names the subjects rather than
+narrating a person's actions. {voice_hint}
 Sentence-count guidance for "summary" (a guideline, NOT a hard rule — the number of
 distinct substantive topics should drive the actual length, don't pad to fit): {sentences}.
 Extract one "topics" entry per distinct subject discussed, in chronological order.
 Do not limit the number of topics — a long recording with many subjects should have many topics. Do not pad with trivial or duplicate topics.
 {long_form_hint}
 """
+
+DIALOGUE_VOICE_HINT = (
+    "This is a conversation. Prefer passive/topic phrasing "
+    '("Обсуждались археологические раскопки и история Беларуси") over active phrasing '
+    'with a vague actor ("Собеседники обсудили ..."). Never use "the speakers" / '
+    '"собеседники" as the grammatical subject and never invent a participant\'s name.'
+)
+MONOLOGUE_VOICE_HINT = (
+    "This is a single-speaker recording. Do NOT invent a subject noun for the speaker "
+    '(no "пассажир", "рассказчик", "автор", "докладчик", "the narrator"). Describe what '
+    "the recording covers by topic, impersonally — name the subjects and what was said "
+    'about them ("Поездка на экзамены: дорога в аэропорт, знакомство в самолёте, ..."), '
+    "not the person doing things."
+)
 
 LONG_FORM_HINT = (
     "This is a long recording: also fill key_topics and decisions with real content. "
@@ -98,8 +114,9 @@ def summarize(doc: RawDoc, cfg: Config, log: logging.Logger) -> Summary:
     tier = select_tier(doc.duration_sec, cfg.summary_tiers)
     is_long_form = (doc.duration_sec / 60) >= cfg.long_form_from_min
     hint = LONG_FORM_HINT if is_long_form else SHORT_FORM_HINT
+    voice_hint = MONOLOGUE_VOICE_HINT if doc.is_monologue else DIALOGUE_VOICE_HINT
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
-        language=doc.language, sentences=tier.sentences, long_form_hint=hint,
+        language=doc.language, sentences=tier.sentences, long_form_hint=hint, voice_hint=voice_hint,
     )
 
     lines = format_transcript_with_timestamps(doc)

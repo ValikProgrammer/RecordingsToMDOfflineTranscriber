@@ -1,8 +1,10 @@
 """LLM-rewritten "pretty" transcript: a non-verbatim, readable version of the talk.
 
-Groups the verbatim transcript into ~1-minute blocks, fixes obvious mishearings and
-removes filler, while keeping speakers and rough timecodes. Never invents content.
-Written to out/pretty/ in addition to the normal verbatim .md (opt-in via --pretty).
+Groups the verbatim transcript into topic-based blocks (each headed by the earliest
+timecode of that topic), fixes obvious mishearings and strips filler, while preserving
+~80% of the actual content — every distinct subject, fact and number is kept. Never
+invents content. Written as a full document (frontmatter + summary + the rewritten
+transcript) to out/pretty/ in addition to the normal verbatim .md (opt-in via --pretty).
 """
 from __future__ import annotations
 
@@ -13,10 +15,14 @@ from ..models import RawDoc
 from .summarize import chunk_transcript
 
 SYSTEM_PROMPT = """You rewrite a verbatim speech-to-text transcript into a clean, readable version, in language code: {language}.
+
+This is NOT a summary. Your job is to make the SAME talk pleasant to read, not to shorten it. Keep roughly 80% of the actual content. Preserve every distinct subject, fact, name, number, reason, and nuance that was actually said — never collapse several subjects into one clause (e.g. do not turn a real discussion of healthcare, crypto, and culture into "discussed crypto and culture" — each subject stays, with its details).
+
 Rules:
-- Group the conversation into roughly one-minute blocks. Start each block with a "[MM:SS]" timecode heading on its own line.
-- Keep who said what: prefix each turn with the speaker label/name exactly as given in the input.
-- Fix obvious mishearings, add punctuation, and remove filler and repetition so it is pleasant to read.
+- Structure the text as blocks, one per distinct topic or episode of the conversation (not fixed time windows).
+- Start each block with a "[MM:SS]" timecode heading on its own line, using the EARLIEST timecode of that topic taken from the input. Timecodes are mandatory — every block must have one. When you merge adjacent sentences that belong to the same topic, keep the earliest of their timecodes.
+- Prefix a turn with the speaker label/name (exactly as given in the input) only when several speakers appear in a block or it reads as a dialogue; for a single-speaker stretch, no prefix is needed.
+- Fix obvious mishearings, add punctuation, and remove only filler words and pure repetition ("ну", "типа", "вот", "короче", restarts) — do NOT remove content.
 - NEVER invent facts, names, numbers, or events that are not in the transcript.
 - Output GitHub-flavored Markdown only — no preamble, no commentary."""
 

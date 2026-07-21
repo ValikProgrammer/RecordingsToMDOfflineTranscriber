@@ -231,8 +231,15 @@ class Pipeline:
 
         if opts.pretty:
             pretty_body = self.pretty_transcript(doc, self.cfg, log)
+            pretty_md = self.render_markdown(
+                doc, day.isoformat(), title,
+                frontmatter=opts.frontmatter,
+                wikilink_speakers=opts.wikilink_speakers,
+                long_form_from_min=self.cfg.long_form_from_min,
+                transcript_override=pretty_body,
+            )
             pretty_path = Path(self.cfg.out_folder) / "pretty" / out_path.name
-            atomic_write_text(pretty_path, f"# {title}\n\n{pretty_body}\n")
+            atomic_write_text(pretty_path, pretty_md)
             log.info(f"pretty: {pretty_path}")
 
         return out_path, raw_path

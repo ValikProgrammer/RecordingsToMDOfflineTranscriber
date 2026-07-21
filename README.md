@@ -75,7 +75,7 @@ python -m transcriber --retry-failed
 | `--speakers` / `--min-speakers` / `--max-speakers` | diarization hints |
 | `--names "Me,Kate"` | names in order of first appearance; also enrolls their voiceprints |
 | `--enroll NAME` | enroll a voice from the input folder's audio into the voice DB, then exit |
-| `--pretty` | also write an LLM-cleaned readable transcript to `out/pretty/` |
+| `--pretty` | also write a full readable document (frontmatter + summary + an LLM-cleaned, topic-blocked transcript) to `out/pretty/` |
 | `--no-frontmatter` | skip the Obsidian YAML frontmatter |
 | `--wikilink-speakers` | render named speakers as `[[Name]]` |
 | `--llm-model NAME` | Ollama model |
@@ -130,7 +130,7 @@ edited files refer to the trimmed audio, not the original recording.
 
 ```
 out/                    # .md only — this is a subfolder of the Obsidian vault
-out/pretty/             # LLM-cleaned readable transcripts (only with --pretty)
+out/pretty/             # full readable documents: frontmatter + summary + cleaned transcript (only with --pretty)
 out/edited/             # silence-trimmed audio copies (transcriber.trim --apply)
 trim_plan.json          # reviewable silence-cut plan (transcriber.trim)
 systems/raw/<hash>.json # raw transcript+diarization — source of truth
