@@ -192,6 +192,13 @@ def test_build_classify_plan_writes_actions(monkeypatch, tmp_path):
     assert actions["2026-07-20 — Natalia scheduler.md"] == "keep"
 
 
+def test_parse_frontmatter_date():
+    from datetime import date
+
+    assert rename.parse_frontmatter_date(_DOC) == date(2026, 7, 20)
+    assert rename.parse_frontmatter_date("# no frontmatter\n") is None
+
+
 def test_fill_proposals_sets_new_name_from_date_in_filename(monkeypatch, tmp_path):
     folder = tmp_path / "out"
     _write(folder / "2026-07-20 — Dec 6.md", _DOC)
@@ -204,3 +211,16 @@ def test_fill_proposals_sets_new_name_from_date_in_filename(monkeypatch, tmp_pat
     e = plan["files"][0]
     assert e["new_title"] == "Документы за границу"
     assert e["new_name"] == "2026-07-20 — Документы за границу.md"
+
+
+def test_fill_proposals_prefers_frontmatter_date_over_filename(monkeypatch, tmp_path):
+    # filename says May 01, frontmatter (Obsidian) says Jul 20 -> frontmatter wins
+    folder = tmp_path / "out"
+    _write(folder / "2026-05-01 — junk.md", _DOC)  # _DOC frontmatter Date is 2026-07-20
+    _install_fake_ollama(monkeypatch, [json.dumps({"A": "Настоящее имя"})])
+    plan = {
+        "folder": str(folder),
+        "files": [{"file": "2026-05-01 — junk.md", "action": "rename", "reason": "x"}],
+    }
+    rename.fill_proposals(plan, folder, "m", LOG, batch_size=576)
+    assert plan["files"][0]["new_name"] == "2026-07-20 — Настоящее имя.md"

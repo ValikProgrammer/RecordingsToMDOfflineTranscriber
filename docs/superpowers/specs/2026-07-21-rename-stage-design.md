@@ -38,8 +38,10 @@ actually needs renaming (often a minority of files). Single evolving
 - For each, parse `### Summary` text and `**Topics:**` terms from the `.md`.
 - Batch (Excel labels) → LLM sees `name + summary + topics` → returns
   `{"A": "<new title>", ...}`.
-- New filename via `naming.build_output_filename(day, new_title)`; `day` from
-  `naming.extract_date_from_name` (fallback `extract_date_from_file`).
+- New filename via `naming.build_output_filename(day, new_title)`. `day` is
+  resolved algorithmically (never from the LLM): frontmatter `Date:` (from
+  Obsidian) → date in the current filename → file mtime. Filename stays
+  `YYYY-MM-DD — <title>.md`.
 - Fill `new_title` and `new_name` into the plan.
 
 ### 3. `--apply` — `python -m transcriber.rename --apply`

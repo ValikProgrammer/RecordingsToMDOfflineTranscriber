@@ -152,6 +152,10 @@ python -m transcriber.rename --propose
 python -m transcriber.rename --apply
 ```
 
+The filename stays `YYYY-MM-DD — <title>.md`: the LLM only proposes the title
+text, never the date. The date is resolved algorithmically — frontmatter `Date:`
+(from Obsidian) → date in the current filename → file mtime.
+
 Flags: `--folder` (docs folder, default `./out`), `--plan` (default
 `rename_plan.json`), `--batch-size` (files per LLM call, default `576`),
 `--model` (defaults to config `llm_model`), `--pretty-subdir` (default `pretty`).

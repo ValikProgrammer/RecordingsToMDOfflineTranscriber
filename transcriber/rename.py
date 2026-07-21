@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import sys
+from datetime import date
 from pathlib import Path
 
 from . import naming
@@ -168,7 +169,28 @@ def propose_titles(
     return titles
 
 
-def _date_for(name: str, folder: Path):
+_FRONTMATTER_DATE_RE = re.compile(r"^Date:\s*(\d{4})-(\d{2})-(\d{2})\s*$", re.M)
+
+
+def parse_frontmatter_date(text: str) -> date | None:
+    """The canonical `Date:` from the doc's Obsidian frontmatter, if present."""
+    m = _FRONTMATTER_DATE_RE.search(text)
+    if not m:
+        return None
+    try:
+        return date(int(m[1]), int(m[2]), int(m[3]))
+    except ValueError:
+        return None
+
+
+def resolve_date(name: str, folder: Path, text: str | None) -> date | None:
+    """Date for the renamed file, algorithmically (never from the LLM):
+    frontmatter `Date:` (from Obsidian) -> date in the current filename -> file mtime.
+    """
+    if text:
+        day = parse_frontmatter_date(text)
+        if day is not None:
+            return day
     day = naming.extract_date_from_name(Path(name).stem)
     if day is not None:
         return day
@@ -183,17 +205,22 @@ def fill_proposals(
     entries = []
     for e in to_rename:
         path = folder / e["file"]
-        summary, topics = ("", [])
+        summary, topics, text = "", [], None
         if path.exists():
-            summary, topics = parse_summary_and_topics(path.read_text(encoding="utf-8"))
-        entries.append({"name": e["file"], "summary": summary, "topics": topics})
+            text = path.read_text(encoding="utf-8")
+            summary, topics = parse_summary_and_topics(text)
+        entries.append(
+            {"name": e["file"], "summary": summary, "topics": topics,
+             "day": resolve_date(e["file"], folder, text)}
+        )
 
     titles = propose_titles(entries, model, log, batch_size)
+    by_name = {en["name"]: en for en in entries}
     for e in to_rename:
         title = titles.get(e["file"])
         if not title:
             continue
-        day = _date_for(e["file"], folder)
+        day = by_name[e["file"]]["day"]
         if day is None:
             log.info(f"skip {e['file']}: no date resolvable")
             continue
