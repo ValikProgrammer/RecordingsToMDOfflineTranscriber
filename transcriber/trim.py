@@ -16,6 +16,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from .stages.ingest import scan_audio_files
@@ -147,6 +148,12 @@ def apply_plan(plan: dict, input_folder: Path, out_dir: Path, log=print) -> int:
     return applied
 
 
+def fmt_elapsed(seconds: float) -> str:
+    """Human-readable elapsed time, e.g. '42s' or '3m 42s'."""
+    m, s = divmod(int(seconds), 60)
+    return f"{m}m {s}s" if m else f"{s}s"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="transcriber.trim", description="Detect and cut silence (algorithmic)")
     parser.add_argument("--input-folder", "--input", dest="input_folder", default="./audio")
@@ -158,6 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-total", dest="min_total", type=float, default=DEFAULT_MIN_TOTAL_SEC)
     args = parser.parse_args(argv)
 
+    start = time.perf_counter()
     plan_path = Path(args.plan)
     if args.apply:
         if not plan_path.exists():
@@ -166,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
         plan = json.loads(plan_path.read_text(encoding="utf-8"))
         applied = apply_plan(plan, Path(args.input_folder), Path(args.out))
         print(f"Applied {applied} trim(s) -> {args.out}")
+        print(f"Done in {fmt_elapsed(time.perf_counter() - start)}")
         return 0
 
     plan = build_plan(Path(args.input_folder), args.noise_db, args.min_gap, args.min_total)
@@ -173,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
     to_trim = sum(1 for f in plan["files"] if f["action"] == "trim")
     print(f"Wrote {plan_path} — {to_trim}/{len(plan['files'])} file(s) proposed for trimming.")
     print("Review/edit it (drop pairs, adjust timecodes, set action=skip), then run --apply.")
+    print(f"Done in {fmt_elapsed(time.perf_counter() - start)}")
     return 0
 
 
