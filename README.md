@@ -126,6 +126,39 @@ path, default `trim_plan.json`).
 Note: cutting interior silence shifts the timeline, so transcript timecodes for
 edited files refer to the trimmed audio, not the original recording.
 
+## Renaming poor titles (post-processing)
+
+`transcriber.rename` is a separate, **LLM-driven** pass over already-generated
+`.md` docs. The pipeline keeps a meaningful source filename as the title but
+falls back to an LLM title only for names it recognises as "technical"; device
+auto-names it doesn't recognise (`Dec 6, 23 57`, `New Recording 5`) leak through
+as ugly titles. This pass fixes them after the fact. Source audio is never
+touched, and the original name stays in each doc's `Source file:` frontmatter.
+
+Three stages so the model only reads summaries for the subset that needs it:
+
+```bash
+# 1. classify — LLM sees ONLY filenames and flags which to rename (cheap)
+python -m transcriber.rename --classify --folder ./out
+# review/edit rename_plan.json: flip "action" between "rename"/"keep"
+
+# 2. propose — for the flagged subset, LLM reads name + summary + topics and
+#    proposes new_title/new_name
+python -m transcriber.rename --propose
+# review/edit new_name / new_title
+
+# 3. apply — renames the .md (collision-safe), rewrites the in-doc Title/heading,
+#    and renames + retitles the out/pretty/ twin
+python -m transcriber.rename --apply
+```
+
+Flags: `--folder` (docs folder, default `./out`), `--plan` (default
+`rename_plan.json`), `--batch-size` (files per LLM call, default `576`),
+`--model` (defaults to config `llm_model`), `--pretty-subdir` (default `pretty`).
+
+Known limitation: it does not update Obsidian `[[old name]]` backlinks, so run it
+before cross-linking freshly generated notes.
+
 ## Layout
 
 ```
@@ -133,6 +166,7 @@ out/                    # .md only — this is a subfolder of the Obsidian vault
 out/pretty/             # full readable documents: frontmatter + summary + cleaned transcript (only with --pretty)
 out/edited/             # silence-trimmed audio copies (transcriber.trim --apply)
 trim_plan.json          # reviewable silence-cut plan (transcriber.trim)
+rename_plan.json         # reviewable title-rename plan (transcriber.rename)
 systems/raw/<hash>.json # raw transcript+diarization — source of truth
 systems/manifest.json   # processing status, dedup by content hash
 systems/voiceprints/    # enrolled voice embeddings, one JSON per name
