@@ -469,6 +469,29 @@ def test_stage_b_enrolls_named_speakers(tmp_path):
     assert store.identify([0.0, 1.0, 0.0], threshold=0.7) == "Иван"
 
 
+def test_pretty_skips_when_output_exists_unless_forced(tmp_path):
+    calls = {"n": 0}
+
+    def spy_pretty(doc, cfg, log):
+        calls["n"] += 1
+        return "PRETTY BODY"
+
+    cfg, _, pipeline = _make_pipeline(tmp_path, pretty_transcript=spy_pretty)
+    raw_path, _ = _write_raw_doc(tmp_path, cfg.systems_folder)
+
+    # first pass: pretty file doesn't exist yet -> generated
+    pipeline.process_existing_raw(raw_path, RunOptions(mode="rerender", pretty=True))
+    assert calls["n"] == 1
+
+    # second pass: pretty file exists -> skipped, not regenerated
+    pipeline.process_existing_raw(raw_path, RunOptions(mode="rerender", pretty=True))
+    assert calls["n"] == 1
+
+    # with --force: regenerated even though the file exists
+    pipeline.process_existing_raw(raw_path, RunOptions(mode="rerender", pretty=True, force=True))
+    assert calls["n"] == 2
+
+
 def test_pretty_flag_writes_pretty_file(tmp_path):
     cfg, manifest, pipeline = _make_pipeline(tmp_path, pretty_transcript=lambda doc, cfg, log: "PRETTY BODY")
     task = _task(path=tmp_path / "team call.m4a")
