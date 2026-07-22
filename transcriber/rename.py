@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import sys
+from datetime import date
 from pathlib import Path
 
 from . import naming
@@ -168,12 +169,47 @@ def propose_titles(
     return titles
 
 
-def _date_for(name: str, folder: Path):
+_FRONTMATTER_DATE_RE = re.compile(r"^Date:\s*(\d{4})-(\d{2})-(\d{2})\s*$", re.M)
+
+
+def parse_frontmatter_date(text: str) -> date | None:
+    """The canonical `Date:` from the doc's Obsidian frontmatter, if present."""
+    m = _FRONTMATTER_DATE_RE.search(text)
+    if not m:
+        return None
+    try:
+        return date(int(m[1]), int(m[2]), int(m[3]))
+    except ValueError:
+        return None
+
+
+def resolve_date(name: str, folder: Path, text: str | None) -> date | None:
+    """Date for the renamed file, algorithmically (never from the LLM):
+    frontmatter `Date:` (from Obsidian) -> date in the current filename -> file mtime.
+    """
+    if text:
+        day = parse_frontmatter_date(text)
+        if day is not None:
+            return day
     day = naming.extract_date_from_name(Path(name).stem)
     if day is not None:
         return day
     path = folder / name
     return naming.extract_date_from_file(path) if path.exists() else None
+
+
+_SOURCE_FILE_RE = re.compile(r"^Source file:\s*(.+?)\s*$", re.M)
+
+
+def parse_source_file(text: str) -> str | None:
+    """The original audio filename from the doc's `Source file:` frontmatter."""
+    m = _SOURCE_FILE_RE.search(text)
+    return m.group(1).strip().strip('"') if m else None
+
+
+def _audio_name_for(new_md_name: str, source_file: str) -> str:
+    """Audio gets the same name as the .md, with the audio's own extension."""
+    return Path(new_md_name).with_suffix(Path(source_file).suffix).name
 
 
 def fill_proposals(
@@ -183,50 +219,96 @@ def fill_proposals(
     entries = []
     for e in to_rename:
         path = folder / e["file"]
-        summary, topics = ("", [])
+        summary, topics, text = "", [], None
         if path.exists():
-            summary, topics = parse_summary_and_topics(path.read_text(encoding="utf-8"))
-        entries.append({"name": e["file"], "summary": summary, "topics": topics})
+            text = path.read_text(encoding="utf-8")
+            summary, topics = parse_summary_and_topics(text)
+        entries.append(
+            {"name": e["file"], "summary": summary, "topics": topics,
+             "day": resolve_date(e["file"], folder, text),
+             "source_file": parse_source_file(text) if text else None}
+        )
 
     titles = propose_titles(entries, model, log, batch_size)
+    by_name = {en["name"]: en for en in entries}
     for e in to_rename:
         title = titles.get(e["file"])
         if not title:
             continue
-        day = _date_for(e["file"], folder)
+        en = by_name[e["file"]]
+        day = en["day"]
         if day is None:
             log.info(f"skip {e['file']}: no date resolvable")
             continue
         e["new_title"] = title
         e["new_name"] = naming.build_output_filename(day, title)
+        if en["source_file"]:
+            e["source_file"] = en["source_file"]
+            e["new_audio_name"] = _audio_name_for(e["new_name"], en["source_file"])
     return plan
 
 
 # --- stage 3: apply -----------------------------------------------------------
 
-def rewrite_title(text: str, new_title: str, has_frontmatter: bool = True) -> str:
-    """Replace the frontmatter `Title:` line (if any) and the first `# ` heading."""
+def rewrite_title(
+    text: str, new_title: str, has_frontmatter: bool = True, new_source_file: str | None = None
+) -> str:
+    """Replace the frontmatter `Title:` line, the first `# ` heading, and (when the
+    audio was renamed too) the frontmatter `Source file:` line."""
     if has_frontmatter:
         text = re.sub(
             r"^Title: .*$", lambda _m: f"Title: {yaml_escape(new_title)}", text, count=1, flags=re.M
         )
+        if new_source_file is not None:
+            text = re.sub(
+                r"^Source file: .*$",
+                lambda _m: f"Source file: {yaml_escape(new_source_file)}",
+                text,
+                count=1,
+                flags=re.M,
+            )
     text = re.sub(r"^# .*$", lambda _m: f"# {new_title}", text, count=1, flags=re.M)
     return text
 
 
-def apply_entry(entry: dict, folder: Path, pretty_subdir: str, log=print) -> bool:
+def _rename_audio(entry: dict, audio_folder: Path, log) -> str | None:
+    """Rename the source audio to entry['new_audio_name']; return the final name
+    (may be collision-suffixed), or None if there's nothing to do / it's missing."""
+    src_name = entry.get("source_file")
+    new_audio_name = entry.get("new_audio_name")
+    if not src_name or not new_audio_name:
+        return None
+    src = audio_folder / src_name
+    if not src.exists():
+        log(f"  audio not found, skipped: {src_name}")
+        return None
+    dst = naming.resolve_collision(audio_folder, new_audio_name)
+    os.replace(src, dst)
+    log(f"  audio: {src_name} -> {dst.name}")
+    return dst.name
+
+
+def apply_entry(
+    entry: dict, folder: Path, pretty_subdir: str, audio_folder: Path, log=print
+) -> dict | None:
+    """Rename the .md (+ pretty twin) and the source audio; keep the doc's Title /
+    heading / Source file in sync. Returns {old_md, new_md, new_audio} or None."""
     new_name = entry.get("new_name")
     new_title = entry.get("new_title")
     if not new_name or not new_title:
-        return False
+        return None
 
     old = folder / entry["file"]
     if not old.exists():
         log(f"skip {entry['file']}: not found in {folder}")
-        return False
+        return None
+
+    # Rename audio first so the md's `Source file:` can point at the final name.
+    new_audio = _rename_audio(entry, audio_folder, log)
 
     old.write_text(
-        rewrite_title(old.read_text(encoding="utf-8"), new_title, has_frontmatter=True),
+        rewrite_title(old.read_text(encoding="utf-8"), new_title, has_frontmatter=True,
+                      new_source_file=new_audio),
         encoding="utf-8",
     )
     dst = naming.resolve_collision(folder, new_name)  # reserves the path atomically
@@ -242,16 +324,40 @@ def apply_entry(entry: dict, folder: Path, pretty_subdir: str, log=print) -> boo
         pdst = naming.resolve_collision(folder / pretty_subdir, dst.name)
         os.replace(pretty, pdst)
         log(f"  pretty: {entry['file']} -> {pdst.name}")
-    return True
+    return {"old_md": entry["file"], "new_md": dst.name, "new_audio": new_audio}
 
 
-def apply_plan(plan: dict, folder: Path, pretty_subdir: str, log=print) -> int:
+def update_manifest(manifest, result: dict, log) -> bool:
+    """Best-effort: keep the manifest entry (matched by out_path filename) in sync
+    with the renamed .md / audio. Dedup is by content hash, so this is cosmetic."""
+    for entry in manifest.all_entries().values():
+        if Path(entry.out_path).name == result["old_md"]:
+            entry.out_path = str(Path(entry.out_path).with_name(result["new_md"]))
+            if result.get("new_audio"):
+                entry.source_name = result["new_audio"]
+            manifest.upsert(entry)
+            return True
+    return False
+
+
+def apply_plan(
+    plan: dict, folder: Path, pretty_subdir: str, audio_folder: Path,
+    manifest_path: Path | None = None, log=print,
+) -> int:
+    manifest = None
+    if manifest_path is not None and Path(manifest_path).exists():
+        from .manifest import Manifest
+
+        manifest = Manifest(Path(manifest_path))
     applied = 0
     for entry in plan.get("files", []):
         if entry.get("action") != "rename":
             continue
-        if apply_entry(entry, folder, pretty_subdir, log):
+        result = apply_entry(entry, folder, pretty_subdir, audio_folder, log)
+        if result:
             applied += 1
+            if manifest is not None:
+                update_manifest(manifest, result, log)
     return applied
 
 
@@ -264,6 +370,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--folder", default=DEFAULT_FOLDER, help="folder of generated .md docs")
     parser.add_argument("--plan", default=DEFAULT_PLAN)
     parser.add_argument("--pretty-subdir", dest="pretty_subdir", default=DEFAULT_PRETTY_SUBDIR)
+    parser.add_argument("--audio-folder", dest="audio_folder", default=None,
+                        help="source audio folder (defaults to config input_folder)")
+    parser.add_argument("--no-manifest", dest="no_manifest", action="store_true",
+                        help="do not update systems/manifest.json on --apply")
     parser.add_argument("--batch-size", dest="batch_size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--model", default=None, help="Ollama model (defaults to config llm_model)")
     parser.add_argument("--config", default=None)
@@ -277,7 +387,8 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     folder = Path(args.folder)
     plan_path = Path(args.plan)
-    model = args.model or load_config(args.config).llm_model
+    cfg = load_config(args.config)
+    model = args.model or cfg.llm_model
 
     if args.classify:
         plan = build_classify_plan(folder, model, log, args.batch_size)
@@ -304,7 +415,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Plan not found: {plan_path}. Run --classify then --propose first.")
         return 1
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    applied = apply_plan(plan, folder, args.pretty_subdir)
+    audio_folder = Path(args.audio_folder or cfg.input_folder)
+    manifest_path = None if args.no_manifest else Path(cfg.systems_folder) / "manifest.json"
+    applied = apply_plan(plan, folder, args.pretty_subdir, audio_folder, manifest_path)
     print(f"Applied {applied} rename(s) in {folder}")
     return 0
 
