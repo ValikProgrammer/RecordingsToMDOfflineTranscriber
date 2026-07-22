@@ -254,17 +254,22 @@ class Pipeline:
         log.info(f"rendered: {out_path}")
 
         if opts.pretty:
-            pretty_body = self.pretty_transcript(doc, self.cfg, log)
-            pretty_md = self.render_markdown(
-                doc, day.isoformat(), title,
-                frontmatter=opts.frontmatter,
-                wikilink_speakers=opts.wikilink_speakers,
-                long_form_from_min=self.cfg.long_form_from_min,
-                transcript_override=pretty_body,
-            )
             pretty_path = Path(self.cfg.out_folder) / "pretty" / out_path.name
-            atomic_write_text(pretty_path, pretty_md)
-            log.info(f"pretty: {pretty_path}")
+            if pretty_path.exists() and not opts.force:
+                # Incremental: the pretty rewrite is the expensive LLM step; skip it
+                # when the output already exists. --force regenerates. Mirrors --summary.
+                log.info(f"pretty exists, skipping (use --force to redo): {pretty_path}")
+            else:
+                pretty_body = self.pretty_transcript(doc, self.cfg, log)
+                pretty_md = self.render_markdown(
+                    doc, day.isoformat(), title,
+                    frontmatter=opts.frontmatter,
+                    wikilink_speakers=opts.wikilink_speakers,
+                    long_form_from_min=self.cfg.long_form_from_min,
+                    transcript_override=pretty_body,
+                )
+                atomic_write_text(pretty_path, pretty_md)
+                log.info(f"pretty: {pretty_path}")
 
         return out_path, raw_path
 
