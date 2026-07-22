@@ -275,6 +275,21 @@ def _write_raw_doc(tmp_path, cfg_systems_folder, content_hash="blake2b:raw1", so
     return raw_path, doc
 
 
+def test_filter_unsummarized_keeps_only_docs_without_summary(tmp_path):
+    from transcriber.models import Summary
+    from transcriber.pipeline import atomic_write_json, filter_unsummarized, hash_hex
+
+    cfg, _, _ = _make_pipeline(tmp_path)
+    no_summary_path, _ = _write_raw_doc(tmp_path, cfg.systems_folder, content_hash="blake2b:pending")
+    with_summary_path, doc = _write_raw_doc(tmp_path, cfg.systems_folder, content_hash="blake2b:done")
+    doc.summary = Summary(title="T", text="already summarized")
+    atomic_write_json(with_summary_path, doc.to_dict())
+
+    result = filter_unsummarized([no_summary_path, with_summary_path])
+
+    assert result == [no_summary_path]
+
+
 def test_process_existing_raw_resummarize_calls_summarize_not_asr(tmp_path):
     def boom(*a, **k):
         raise AssertionError("ASR must not run for --resummarize")

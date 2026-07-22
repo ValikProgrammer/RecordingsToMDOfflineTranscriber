@@ -12,7 +12,7 @@ from .cli import apply_overrides, build_run_options, parse_args, resolve_mode
 from .config import Config, load_config
 from .logging_setup import setup_run_logger
 from .manifest import Manifest
-from .pipeline import Pipeline, filter_tasks, list_raw_files
+from .pipeline import Pipeline, filter_tasks, filter_unsummarized, list_raw_files
 from .progress import make_reporter
 from .stages.audio import FfmpegNotFoundError, check_ffmpeg_available, normalize, probe_duration
 from .stages.ingest import scan_and_hash
@@ -149,6 +149,12 @@ def cmd_run(cfg: Config, args, log) -> int:
             raw_paths = list_raw_files(Path(cfg.systems_folder))
             if opts.only:
                 raw_paths = [p for p in raw_paths if opts.only in p.stem]
+            if mode == "summary" and not opts.force:
+                before = len(raw_paths)
+                raw_paths = filter_unsummarized(raw_paths)
+                skipped = before - len(raw_paths)
+                if skipped:
+                    log.info(f"skipping {skipped} already-summarized (use --force to redo)")
             log.info(f"{len(raw_paths)} raw files to process (mode={mode})")
             total_audio = sum(_raw_duration(p) for p in raw_paths)
             reporter.start_batch(total_audio, len(raw_paths))

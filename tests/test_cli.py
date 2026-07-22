@@ -137,6 +137,15 @@ def test_enroll_flag_parsed():
     assert parse_args([]).enroll is None
 
 
+def test_force_flag_parsed_and_mapped_to_run_option():
+    from transcriber.cli import build_run_options, parse_args
+
+    assert parse_args(["--summary", "--force"]).force is True
+    assert parse_args(["--summary"]).force is False
+    assert build_run_options(parse_args(["--summary", "--force"]), "summary").force is True
+    assert build_run_options(parse_args(["--summary"]), "summary").force is False
+
+
 def test_pretty_flag_sets_run_option():
     from transcriber.cli import build_run_options, parse_args, resolve_mode
 
