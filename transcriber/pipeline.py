@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -181,6 +181,17 @@ class Pipeline:
         self.pretty_transcript = pretty_transcript
         self.reporter = reporter if reporter is not None else NullReporter()
         self.console_logs = console_logs
+        self._drain = threading.Event()  # set by request_drain(): finish in-flight, take no new files
+
+    def request_drain(self) -> bool:
+        """Ask run_all to stop taking NEW files while finishing in-flight ones.
+
+        Returns True on the first request, False if a drain is already in progress
+        (so a signal handler can force-quit on the second Ctrl-C)."""
+        if self._drain.is_set():
+            return False
+        self._drain.set()
+        return True
 
     # --- shared helpers -------------------------------------------------
 
@@ -368,15 +379,34 @@ class Pipeline:
         total = len(tasks)
 
         def worker_a() -> None:
+            # Bound how far stage A (ffmpeg + lang-detect, CPU) may run ahead of the
+            # GPU stage: submit at most `stage_a_lookahead` files at a time instead of
+            # all at once. Otherwise the pool churns through the whole batch eagerly,
+            # piling up normalized files + model work and driving the machine into
+            # memory pressure / OOM (issue: night-run jetsam kills).
+            lookahead = max(1, self.cfg.stage_a_lookahead)
+            task_iter = iter(enumerate(tasks, start=1))
             with ThreadPoolExecutor(max_workers=jobs) as pool:
-                submitted = [
-                    pool.submit(self._safe_stage_a, t, i, total, tmp_root)
-                    for i, t in enumerate(tasks, start=1)
-                ]
-                for fut in submitted:
-                    ctx = fut.result()
-                    if ctx is not None:
-                        stage_a_out.put(ctx)
+                pending: set = set()
+                exhausted = False
+                while pending or not exhausted:
+                    while len(pending) < lookahead and not exhausted:
+                        if self._drain.is_set():  # graceful stop: no new files, let in-flight finish
+                            exhausted = True
+                            break
+                        nxt = next(task_iter, None)
+                        if nxt is None:
+                            exhausted = True
+                            break
+                        i, t = nxt
+                        pending.add(pool.submit(self._safe_stage_a, t, i, total, tmp_root))
+                    if not pending:
+                        break
+                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    for fut in done:
+                        ctx = fut.result()
+                        if ctx is not None:
+                            stage_a_out.put(ctx)
             stage_a_out.put(_SENTINEL)
 
         def worker_b() -> None:

@@ -1,6 +1,8 @@
 """Entry point: python -m transcriber (§6, §16 milestones 1 & 10)."""
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -105,6 +107,24 @@ def _select_transcribe(cfg: Config, args):
     return asr_mlx.transcribe, "ASR backend: mlx (Metal/GPU)"
 
 
+def _install_drain_handlers(pipeline, log) -> None:
+    """1st SIGINT/SIGTERM → graceful drain (finish in-flight, no new files); 2nd → force-quit."""
+    def _handler(signum, frame):  # noqa: ARG001 - signal handler signature
+        if pipeline.request_drain():
+            print(
+                "\n[stopping] finishing in-flight files, taking no new ones — "
+                "press Ctrl-C again to force-quit.",
+                flush=True,
+            )
+            log.info(f"signal {signum}: graceful drain requested")
+        else:
+            print("\n[force-quit]", flush=True)
+            os._exit(130)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, _handler)
+
+
 def cmd_run(cfg: Config, args, log) -> int:
     manifest = Manifest(Path(cfg.systems_folder) / "manifest.json")
     mode = resolve_mode(args)
@@ -123,6 +143,7 @@ def cmd_run(cfg: Config, args, log) -> int:
             reporter.start_batch(total_audio, len(tasks))
             if tasks:
                 log.info("preparing models (first run may download several GB)…")
+            _install_drain_handlers(pipeline, log)  # Ctrl-C = graceful drain (run_all honors it)
             pipeline.run_all(tasks, opts, jobs=cfg.jobs)
         else:  # summary | resummarize | rerender
             raw_paths = list_raw_files(Path(cfg.systems_folder))

@@ -18,7 +18,7 @@ _SIMPLE_KEYS = (
     "lang_detect_min_prob",
     "llm_model", "llm_ctx", "diarize_device",
     "mono_threshold", "min_speaker_share", "voiceprint_enabled", "voiceprint_threshold",
-    "jobs", "obsidian_frontmatter", "wikilink_speakers",
+    "jobs", "stage_a_lookahead", "obsidian_frontmatter", "wikilink_speakers",
     "progress_default_rtf",
 )
 
@@ -59,6 +59,7 @@ class Config:
     voiceprint_enabled: bool = True
     voiceprint_threshold: float = 0.7
     jobs: int = 3
+    stage_a_lookahead: int = 3  # max files stage A (ffmpeg+lang-detect) may run ahead of the GPU stage
     obsidian_frontmatter: bool = True
     wikilink_speakers: bool = False
     summary_tiers: list[SummaryTier] = field(default_factory=_default_tiers)
