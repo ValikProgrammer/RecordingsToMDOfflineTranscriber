@@ -7,9 +7,29 @@ import threading
 from dataclasses import asdict
 from pathlib import Path
 
-from .models import ManifestEntry
+from .models import ManifestEntry, StageState, default_stages
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+
+def migrate_entry(raw: dict) -> ManifestEntry:
+    """Build a `ManifestEntry` from a raw manifest dict, migrating legacy
+    (schema 1, no `stages`) entries per the schema-v2 migration rules:
+    only a legacy root `status == "done"` implies `text=done`; every other
+    legacy status (or missing status) leaves all stages `pending`. Never
+    infer `diarize`/`summary`/`pretty` from disk artifacts.
+    """
+    raw = dict(raw)
+    stages_raw = raw.pop("stages", None)
+    if stages_raw is not None:
+        raw["stages"] = {name: StageState(**value) for name, value in stages_raw.items()}
+        return ManifestEntry(**raw)
+
+    stages = default_stages()
+    if raw.get("status") == "done":
+        stages["text"] = StageState(status="done", updated_at=raw.get("updated_at", ""))
+    raw["stages"] = stages
+    return ManifestEntry(**raw)
 
 
 class Manifest:
@@ -24,7 +44,7 @@ class Manifest:
         with open(self._path, "r", encoding="utf-8") as f:
             data = json.load(f)
         return {
-            key: ManifestEntry(**value) for key, value in data.get("entries", {}).items()
+            key: migrate_entry(value) for key, value in data.get("entries", {}).items()
         }
 
     def _save_locked(self) -> None:
