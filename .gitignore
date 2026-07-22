@@ -21,3 +21,6 @@ prompt.md
 .obsidian
 config.toml
 *.local.txt
+night_run/
+cmp/
+Recordings_copy/
