@@ -32,6 +32,35 @@ def test_resolve_mode_diarize():
     assert resolve_mode(parse_args(["--diarize"])) == "diarize"
 
 
+def test_diarize_alone_is_postpass_mode():
+    assert resolve_mode(parse_args(["--diarize"])) == "diarize"
+
+
+def test_text_plus_diarize_sets_want_diarize():
+    args = parse_args(["--text", "--diarize"])
+    assert resolve_mode(args) == "text"
+    opts = build_run_options(args, "text")
+    assert opts.want_diarize is True
+
+
+def test_text_alone_leaves_want_diarize_false():
+    args = parse_args(["--text"])
+    assert resolve_mode(args) == "text"
+    opts = build_run_options(args, "text")
+    assert opts.want_diarize is False
+
+
+def test_full_wants_diarize():
+    opts = build_run_options(parse_args([]), "full")
+    assert opts.want_diarize is True
+
+
+def test_diarize_mode_wants_diarize():
+    args = parse_args(["--diarize"])
+    opts = build_run_options(args, "diarize")
+    assert opts.want_diarize is True
+
+
 def test_parse_names_splits_and_trims():
     assert parse_names("Alex, Jamie") == ["Alex", "Jamie"]
     assert parse_names(None) is None

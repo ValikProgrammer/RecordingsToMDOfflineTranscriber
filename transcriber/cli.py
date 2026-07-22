@@ -54,7 +54,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def resolve_mode(args: argparse.Namespace) -> str:
     if args.text_mode:
-        return "text"
+        return "text"  # --text --diarize still lands here; want_diarize carries the diarize request
     if args.diarize_mode:
         return "diarize"
     if args.summary_mode:
@@ -115,4 +115,5 @@ def build_run_options(args: argparse.Namespace, mode: str) -> RunOptions:
         wikilink_speakers=args.wikilink_speakers,
         pretty=args.pretty,
         force=args.force,
+        want_diarize=bool(args.diarize_mode) or mode == "full",
     )

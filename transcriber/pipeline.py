@@ -51,6 +51,7 @@ class RunOptions:
     wikilink_speakers: bool = False
     pretty: bool = False
     force: bool = False  # --summary --force: re-summarize raw docs that already have a summary
+    want_diarize: bool = False  # diarization requested: --diarize (post-pass) or full (inline)
 
 
 def utcnow_iso() -> str:
