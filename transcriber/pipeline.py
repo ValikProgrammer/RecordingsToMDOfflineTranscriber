@@ -50,6 +50,7 @@ class RunOptions:
     frontmatter: bool = True
     wikilink_speakers: bool = False
     pretty: bool = False
+    force: bool = False  # --summary --force: re-summarize raw docs that already have a summary
 
 
 def utcnow_iso() -> str:
@@ -136,6 +137,14 @@ def load_raw_doc(raw_path: Path) -> RawDoc:
 
 def list_raw_files(systems_folder: Path) -> list[Path]:
     return sorted((Path(systems_folder) / "raw").glob("*.json"))
+
+
+def filter_unsummarized(raw_paths: list[Path]) -> list[Path]:
+    """Keep only raw docs that don't have a summary yet (incremental --summary).
+
+    Mirrors scan_and_hash's skip-done: a raw doc gets a summary written back once
+    summarized (full/--summary), so `summary is None` means "not summarized yet"."""
+    return [p for p in raw_paths if load_raw_doc(p).summary is None]
 
 
 @dataclass

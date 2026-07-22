@@ -23,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resummarize", dest="resummarize_mode", action="store_true")
     parser.add_argument("--rerender", dest="rerender_mode", action="store_true")
     parser.add_argument("--retry-failed", dest="retry_failed", action="store_true")
+    parser.add_argument("--force", dest="force", action="store_true")
     parser.add_argument("--turbo", dest="turbo", action="store_true")
     parser.add_argument("--speakers", dest="speakers", type=int, default=None)
     parser.add_argument("--min-speakers", dest="min_speakers", type=int, default=None)
@@ -105,4 +106,5 @@ def build_run_options(args: argparse.Namespace, mode: str) -> RunOptions:
         frontmatter=not args.no_frontmatter,
         wikilink_speakers=args.wikilink_speakers,
         pretty=args.pretty,
+        force=args.force,
     )
