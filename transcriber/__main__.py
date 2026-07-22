@@ -12,7 +12,14 @@ from .cli import apply_overrides, build_run_options, parse_args, resolve_mode
 from .config import Config, load_config
 from .logging_setup import setup_run_logger
 from .manifest import Manifest
-from .pipeline import Pipeline, filter_tasks, filter_unsummarized, list_raw_files
+from .pipeline import (
+    Pipeline,
+    filter_tasks,
+    filter_unsummarized,
+    list_raw_files,
+    load_raw_doc,
+    resolve_raw_by_query,
+)
 from .progress import make_reporter
 from .stages.audio import FfmpegNotFoundError, check_ffmpeg_available, normalize, probe_duration
 from .stages.ingest import scan_and_hash
@@ -135,7 +142,7 @@ def cmd_run(cfg: Config, args, log) -> int:
     pipeline = Pipeline(cfg, manifest, transcribe=transcribe, reporter=reporter, console_logs=True)
 
     try:
-        if mode in ("full", "text"):
+        if mode in ("full", "text", "diarize"):
             tasks = scan_and_hash(Path(cfg.input_folder), manifest, retry_failed=args.retry_failed)
             tasks = filter_tasks(tasks, opts.only, opts.skip)
             log.info(f"{len(tasks)} files to process (mode={mode})")
@@ -200,6 +207,34 @@ def cmd_enroll(cfg: Config, args, log) -> int:
     return 0 if enrolled else 1
 
 
+def cmd_enroll_from_raw(cfg: Config, args, log) -> int:
+    """Enroll named speakers' voiceprints from an already-labeled raw JSON doc.
+
+    Unlike --enroll (one recording, dominant speaker, needs audio), this reads the
+    embeddings already stored in a raw doc's speakers_meta — so one labeled
+    multi-speaker dialog seeds several names at once, no audio or pyannote needed."""
+    from .voiceprints import VoiceprintStore, enroll_named_speakers
+
+    raw_paths = resolve_raw_by_query(Path(cfg.systems_folder), args.enroll_raw)
+    if not raw_paths:
+        print(f"No raw doc matched {args.enroll_raw!r} under {cfg.systems_folder}/raw.")
+        return 1
+
+    store = VoiceprintStore(Path(cfg.systems_folder) / "voiceprints")
+    total = 0
+    for raw_path in raw_paths:
+        doc = load_raw_doc(raw_path)
+        enrolled = enroll_named_speakers(doc, store)
+        for name in enrolled:
+            print(f"enrolled {name} from {doc.source_name}")
+        if not enrolled:
+            print(f"skip {doc.source_name}: no named speakers with embeddings")
+        total += len(enrolled)
+
+    print(f"Enrolled {total} speaker sample(s) from {len(raw_paths)} raw doc(s).")
+    return 0 if total else 1
+
+
 def _silence_hf_download_bars() -> None:
     """Kill HuggingFace-hub's own tqdm download/reconstruct bars — noise here, and
     they collide with our progress bars (they even show 0.00B when models are
@@ -233,6 +268,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_warmup(cfg, log)
     if args.enroll:
         return cmd_enroll(cfg, args, log)
+    if args.enroll_raw:
+        return cmd_enroll_from_raw(cfg, args, log)
     if args.dry_run:
         return cmd_dry_run(cfg, args)
     return cmd_run(cfg, args, log)

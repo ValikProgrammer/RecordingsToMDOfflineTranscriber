@@ -28,6 +28,10 @@ def test_resolve_mode_priority_summary_resummarize_rerender():
     assert resolve_mode(parse_args(["--rerender"])) == "rerender"
 
 
+def test_resolve_mode_diarize():
+    assert resolve_mode(parse_args(["--diarize"])) == "diarize"
+
+
 def test_parse_names_splits_and_trims():
     assert parse_names("Alex, Jamie") == ["Alex", "Jamie"]
     assert parse_names(None) is None
@@ -38,12 +42,14 @@ def test_apply_overrides_sets_config_fields():
     cfg = Config()
     args = parse_args([
         "--input-folder", "./a", "--out", "./b", "--llm-model", "custom:model",
+        "--llm-ctx", "40000",
         "--jobs", "5", "--diarize-device", "cpu", "--no-frontmatter", "--wikilink-speakers",
     ])
     cfg = apply_overrides(cfg, args)
     assert cfg.input_folder == "./a"
     assert cfg.out_folder == "./b"
     assert cfg.llm_model == "custom:model"
+    assert cfg.llm_ctx == 40000
     assert cfg.jobs == 5
     assert cfg.diarize_device == "cpu"
     assert cfg.obsidian_frontmatter is False

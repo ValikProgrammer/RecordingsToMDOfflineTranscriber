@@ -19,6 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--only", dest="only", default=None)
     parser.add_argument("--skip", "--exclude", dest="skip", nargs="+", default=None)
     parser.add_argument("--transcribe", "--text", dest="text_mode", action="store_true")
+    parser.add_argument("--diarize", "--diarization", dest="diarize_mode", action="store_true")
     parser.add_argument("--summary", dest="summary_mode", action="store_true")
     parser.add_argument("--resummarize", dest="resummarize_mode", action="store_true")
     parser.add_argument("--rerender", dest="rerender_mode", action="store_true")
@@ -33,8 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wikilink-speakers", dest="wikilink_speakers", action="store_true")
     parser.add_argument("--pretty", dest="pretty", action="store_true")
     parser.add_argument("--llm-model", dest="llm_model", default=None)
+    parser.add_argument("--llm-ctx", dest="llm_ctx", type=int, default=None,
+                        help="LLM context / chunk budget (also passed to Ollama as num_ctx)")
     parser.add_argument("--language", dest="language", default=None)
     parser.add_argument("--enroll", dest="enroll", default=None, metavar="NAME")
+    parser.add_argument("--enroll-raw", dest="enroll_raw", default=None, metavar="PATH|NAME")
     parser.add_argument("--jobs", dest="jobs", type=int, default=None)
     parser.add_argument("--diarize-device", dest="diarize_device", choices=["mps", "cpu"], default=None)
     parser.add_argument("--dry-run", dest="dry_run", action="store_true")
@@ -51,6 +55,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def resolve_mode(args: argparse.Namespace) -> str:
     if args.text_mode:
         return "text"
+    if args.diarize_mode:
+        return "diarize"
     if args.summary_mode:
         return "summary"
     if args.resummarize_mode:
@@ -80,6 +86,8 @@ def apply_overrides(cfg: Config, args: argparse.Namespace) -> Config:
         cfg.asr_backend = args.asr_backend
     if args.llm_model is not None:
         cfg.llm_model = args.llm_model
+    if args.llm_ctx is not None:
+        cfg.llm_ctx = args.llm_ctx
     if args.jobs is not None:
         cfg.jobs = args.jobs
     if args.diarize_device is not None:

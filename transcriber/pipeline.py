@@ -39,7 +39,7 @@ _SENTINEL = object()
 
 @dataclass
 class RunOptions:
-    mode: str  # "full" | "text" | "summary" | "resummarize" | "rerender"
+    mode: str  # "full" | "text" | "diarize" | "summary" | "resummarize" | "rerender"
     only: str | None = None
     skip: list[str] | None = None
     turbo: bool = False
@@ -137,6 +137,29 @@ def load_raw_doc(raw_path: Path) -> RawDoc:
 
 def list_raw_files(systems_folder: Path) -> list[Path]:
     return sorted((Path(systems_folder) / "raw").glob("*.json"))
+
+
+def resolve_raw_by_query(systems_folder: Path, query: str) -> list[Path]:
+    """Resolve a `--enroll-raw` argument to raw JSON paths.
+
+    A direct path to an existing file wins. Otherwise treat `query` as a
+    case-insensitive substring and match raw docs by filename stem (the content
+    hash) or by their `source_name`."""
+    direct = Path(query)
+    if direct.is_file():
+        return [direct]
+    needle = query.lower()
+    matches: list[Path] = []
+    for p in list_raw_files(systems_folder):
+        if needle in p.stem.lower():
+            matches.append(p)
+            continue
+        try:
+            if needle in load_raw_doc(p).source_name.lower():
+                matches.append(p)
+        except (OSError, ValueError, KeyError):  # skip unreadable/corrupt raw
+            continue
+    return matches
 
 
 def filter_unsummarized(raw_paths: list[Path]) -> list[Path]:
@@ -306,9 +329,7 @@ class Pipeline:
         from . import voiceprints
 
         store = voiceprints.VoiceprintStore(Path(self.cfg.systems_folder) / "voiceprints")
-        for sm in doc.speakers_meta:
-            if sm.name and sm.embedding:  # confirmed name from --names — treat as ground truth
-                store.enroll(sm.name, sm.embedding)
+        voiceprints.enroll_named_speakers(doc, store)  # confirmed --names → ground truth
         voiceprints.identify_speakers(doc, store, self.cfg.voiceprint_threshold)
 
     def _safe_stage_b(self, ctx: _Ctx, opts: RunOptions) -> _Ctx | None:

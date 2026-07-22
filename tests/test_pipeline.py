@@ -209,6 +209,32 @@ def test_run_all_text_mode_never_calls_diarize_or_summarize(tmp_path):
     assert "### Summary" not in md
 
 
+def test_run_all_diarize_mode_diarizes_but_skips_summary(tmp_path):
+    def boom_summarize(*a, **k):
+        raise AssertionError("summarize must not run in --diarize mode")
+
+    calls = {"diarize": 0}
+
+    def counting_diar(wav, device, s, mn, mx, log):
+        calls["diarize"] += 1
+        return _fake_diar()
+
+    cfg, manifest, pipeline = _make_pipeline(
+        tmp_path, diarize=counting_diar, summarize=boom_summarize
+    )
+    task = _task(path=tmp_path / "team call.m4a")
+    task.path.write_bytes(b"fake audio")
+
+    pipeline.run_all([task], RunOptions(mode="diarize"), jobs=1)
+
+    entry = manifest.get(task.content_hash)
+    assert entry.status == "done"
+    assert calls["diarize"] == 1
+    assert Path(entry.raw_path).exists()
+    md = Path(entry.out_path).read_text(encoding="utf-8")
+    assert "### Summary" not in md
+
+
 def test_run_all_stage_a_failure_marks_failed_and_does_not_crash_others(tmp_path):
     def failing_normalize(path, tmp_dir):
         if "bad" in path.name:
