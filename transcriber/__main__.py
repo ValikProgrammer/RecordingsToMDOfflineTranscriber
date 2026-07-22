@@ -83,7 +83,15 @@ def cmd_warmup(cfg: Config, log) -> int:
 
 def cmd_dry_run(cfg: Config, args) -> int:
     manifest = Manifest(Path(cfg.systems_folder) / "manifest.json")
-    tasks = scan_and_hash(Path(cfg.input_folder), manifest, retry_failed=args.retry_failed)
+    mode = resolve_mode(args)
+    need_stage = "diarize" if mode == "diarize" else "text"
+    tasks = scan_and_hash(
+        Path(cfg.input_folder),
+        manifest,
+        retry_failed=args.retry_failed,
+        need_stage=need_stage,
+        force=args.force,
+    )
     if not tasks:
         print(f"No supported audio files found in {cfg.input_folder}.")
         return 0
@@ -143,7 +151,14 @@ def cmd_run(cfg: Config, args, log) -> int:
 
     try:
         if mode in ("full", "text", "diarize"):
-            tasks = scan_and_hash(Path(cfg.input_folder), manifest, retry_failed=args.retry_failed)
+            need_stage = "diarize" if mode == "diarize" else "text"
+            tasks = scan_and_hash(
+                Path(cfg.input_folder),
+                manifest,
+                retry_failed=args.retry_failed,
+                need_stage=need_stage,
+                force=args.force,
+            )
             tasks = filter_tasks(tasks, opts.only, opts.skip)
             log.info(f"{len(tasks)} files to process (mode={mode})")
             total_audio = probe_total_audio(tasks, log)
