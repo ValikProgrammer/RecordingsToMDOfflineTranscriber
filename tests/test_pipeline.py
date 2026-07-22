@@ -474,6 +474,74 @@ def test_pretty_flag_writes_pretty_file(tmp_path):
     assert "**[00:00]" not in pretty
 
 
+def test_request_drain_first_true_then_false(tmp_path):
+    _, _, pipeline = _make_pipeline(tmp_path)
+    assert pipeline.request_drain() is True   # first signal: start draining
+    assert pipeline.request_drain() is False  # second signal: caller should force-quit
+
+
+def test_drain_stops_taking_new_files(tmp_path):
+    # After drain is requested, stage A must not pull any new files (run still exits cleanly).
+    processed = []
+
+    def spy_transcribe(wav, turbo, log, **kw):
+        processed.append(str(wav))
+        return _fake_asr()
+
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, transcribe=spy_transcribe)
+    pipeline.request_drain()  # drain before the run even starts
+    tasks = []
+    for i in range(4):
+        t = _task(name=f"f{i}.m4a", content_hash=f"blake2b:{i}", path=tmp_path / f"f{i}.m4a")
+        t.path.write_bytes(b"x")
+        tasks.append(t)
+
+    pipeline.run_all(tasks, RunOptions(mode="text"), jobs=2)  # returns cleanly, takes nothing new
+
+    assert processed == []
+    assert all(manifest.get(t.content_hash) is None for t in tasks)
+
+
+def test_stage_a_does_not_run_far_ahead_of_gpu(tmp_path):
+    # Regression: stage A must not eagerly churn the whole batch (memory blowup).
+    # With stage B blocked, stage A should stall after ~lookahead files, not all of them.
+    import time
+
+    release = threading.Event()
+    starts = []
+    lock = threading.Lock()
+
+    def counting_normalize(path, tmp_dir):
+        with lock:
+            starts.append(path.name)
+        return _fake_normalize(path, tmp_dir)
+
+    def blocking_transcribe(wav, turbo, log, **kw):
+        release.wait(timeout=10)  # stall the GPU stage
+        return _fake_asr()
+
+    cfg, manifest, pipeline = _make_pipeline(
+        tmp_path, normalize=counting_normalize, transcribe=blocking_transcribe
+    )
+    cfg.stage_a_lookahead = 3
+    tasks = []
+    for i in range(12):
+        t = _task(name=f"f{i}.m4a", content_hash=f"blake2b:{i}", path=tmp_path / f"f{i}.m4a")
+        t.path.write_bytes(b"x")
+        tasks.append(t)
+
+    th = threading.Thread(target=pipeline.run_all, args=(tasks, RunOptions(mode="text"), 2))
+    th.start()
+    time.sleep(0.6)  # let stage A run as far ahead as it's allowed
+    with lock:
+        ahead = len(starts)
+    release.set()
+    th.join(timeout=15)
+
+    # lookahead(3) + stage_a_out queue(jobs=2) + in-flight slack — never the whole batch of 12
+    assert ahead <= 6, f"stage A ran {ahead} files ahead — backpressure not working"
+
+
 def test_auto_language_forces_detector_result(tmp_path):
     captured = {}
 

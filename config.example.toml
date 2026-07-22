@@ -17,6 +17,7 @@ min_speaker_share = 0.02       # speakers below this share of total speech are f
 voiceprint_enabled = true      # auto-name speakers from the voice DB; enroll by passing --names or `--enroll "Name"`
 voiceprint_threshold = 0.7     # cosine-similarity threshold for matching a voice (higher = stricter)
 jobs = 3                       # workers for CPU stages (ffmpeg/summary/render); the GPU stage is always 1
+stage_a_lookahead = 3          # max files ffmpeg+lang-detect may run ahead of the GPU stage (caps memory)
 obsidian_frontmatter = true    # add a YAML frontmatter (properties) block to the top of the .md
 wikilink_speakers = false      # render named speakers as [[Name]] (Obsidian graph/backlinks)
 progress_default_rtf = 0.6     # wall/audio seed for progress ETAs until the first file finishes (lower = faster machine)
