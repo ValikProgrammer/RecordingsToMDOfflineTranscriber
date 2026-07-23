@@ -205,8 +205,37 @@ def test_run_all_text_mode_never_calls_diarize_or_summarize(tmp_path):
 
     entry = manifest.get(task.content_hash)
     assert entry.status == "done"
+    assert entry.stages["text"].status == "done"
+    assert entry.stages["diarize"].status == "pending"
+    assert entry.stages["summary"].status == "pending"
     md = Path(entry.out_path).read_text(encoding="utf-8")
     assert "### Summary" not in md
+
+
+def test_run_all_text_plus_want_diarize_marks_both_stages(tmp_path):
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, summarize=lambda *a, **k: (_ for _ in ()).throw(AssertionError("no summary")))
+    task = _task(path=tmp_path / "team call.m4a")
+    task.path.write_bytes(b"fake audio")
+
+    pipeline.run_all([task], RunOptions(mode="text", want_diarize=True), jobs=1)
+
+    entry = manifest.get(task.content_hash)
+    assert entry.stages["text"].status == "done"
+    assert entry.stages["diarize"].status == "done"
+    assert entry.stages["summary"].status == "pending"
+
+
+def test_run_all_full_mode_marks_text_diarize_summary_done(tmp_path):
+    cfg, manifest, pipeline = _make_pipeline(tmp_path)
+    task = _task(path=tmp_path / "team call.m4a")
+    task.path.write_bytes(b"fake audio")
+
+    pipeline.run_all([task], RunOptions(mode="full", want_diarize=True), jobs=1)
+
+    entry = manifest.get(task.content_hash)
+    assert entry.stages["text"].status == "done"
+    assert entry.stages["diarize"].status == "done"
+    assert entry.stages["summary"].status == "done"
 
 
 def test_run_all_diarize_mode_diarizes_but_skips_summary(tmp_path):

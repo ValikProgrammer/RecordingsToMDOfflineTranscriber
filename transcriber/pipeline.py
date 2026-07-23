@@ -25,7 +25,7 @@ from . import naming
 from .config import Config
 from .logging_setup import per_file_log_path, setup_file_logger
 from .manifest import Manifest
-from .models import FileTask, ManifestEntry, RawDoc
+from .models import FileTask, ManifestEntry, RawDoc, StageState, default_stages
 from .progress import NullReporter
 from .stages import asr_mlx, audio as audio_stage, diarize as diarize_stage
 from .stages import langdetect as langdetect_stage
@@ -64,6 +64,15 @@ def hash_hex(content_hash: str) -> str:
 
 def hash8(content_hash: str) -> str:
     return hash_hex(content_hash)[:8]
+
+
+def _with_stage(stages: dict[str, StageState], name: str, status: str, reason: str | None = None) -> dict[str, StageState]:
+    """Return a copy of `stages` with `name` set to `status` — never mutates the
+    input dict, so callers can safely reuse a prior manifest entry's stages when
+    building the next one (upsert must merge, not wipe stages to defaults)."""
+    updated = dict(stages)
+    updated[name] = StageState(status=status, updated_at=utcnow_iso(), reason=reason)
+    return updated
 
 
 def filter_tasks(tasks: list[FileTask], only: str | None, skip: list[str] | None) -> list[FileTask]:
@@ -183,6 +192,7 @@ class _Ctx:
     duration: float = 0.0
     language: str | None = None  # resolved in stage A: forced code, or detected, or None (auto)
     doc: RawDoc | None = None
+    diarized: bool = False  # set in stage B: did this run take the ASR-parallel-diarize path?
 
 
 class Pipeline:
@@ -229,13 +239,15 @@ class Pipeline:
     # --- shared helpers -------------------------------------------------
 
     def _mark_in_progress(self, content_hash: str, source_name: str, log_path: Path) -> None:
-        """Transition to in_progress while preserving out_path from any prior run,
-        so a later rerender/resummarize overwrites the same file instead of colliding."""
+        """Transition to in_progress while preserving out_path and per-stage status
+        from any prior run, so a later rerender/resummarize overwrites the same file
+        instead of colliding, and stages already `done` aren't wiped back to pending."""
         existing = self.manifest.get(content_hash)
         self.manifest.upsert(
             ManifestEntry(
                 content_hash=content_hash, source_name=source_name, status="in_progress",
                 out_path=existing.out_path if existing else None,
+                stages=dict(existing.stages) if existing else default_stages(),
                 log_path=str(log_path), updated_at=utcnow_iso(),
             )
         )
@@ -243,11 +255,13 @@ class Pipeline:
     def _fail(self, task: FileTask, log_path: Path, log: logging.Logger, exc: Exception) -> None:
         log.info(f"FAILED: {exc}\n{traceback.format_exc()}")
         self.reporter.file_failed(task.content_hash, exc)
+        existing = self.manifest.get(task.content_hash)
         self.manifest.upsert(
             ManifestEntry(
                 content_hash=task.content_hash,
                 source_name=task.source_name,
                 status="failed",
+                stages=dict(existing.stages) if existing else default_stages(),
                 log_path=str(log_path),
                 error=str(exc),
                 updated_at=utcnow_iso(),
@@ -261,7 +275,13 @@ class Pipeline:
         filename = naming.build_output_filename(day, title)
         return naming.resolve_collision(Path(self.cfg.out_folder), filename)
 
-    def _write_outputs(self, doc: RawDoc, task: FileTask, opts: RunOptions, log: logging.Logger) -> tuple[Path, Path]:
+    def _write_outputs(
+        self, doc: RawDoc, task: FileTask, opts: RunOptions, log: logging.Logger
+    ) -> tuple[Path, Path, bool]:
+        """Returns (out_path, raw_path, pretty_written). `pretty_written` is False
+        when `--pretty` wasn't requested, or was skipped because the file already
+        exists (incremental) — callers use it to decide whether `pretty` stage
+        becomes `done` this run."""
         title, day = resolve_title_and_date(task.source_name, task.path, doc)
 
         raw_path = Path(self.cfg.systems_folder) / "raw" / f"{hash_hex(task.content_hash)}.json"
@@ -277,6 +297,7 @@ class Pipeline:
         atomic_write_text(out_path, md)
         log.info(f"rendered: {out_path}")
 
+        pretty_written = False
         if opts.pretty:
             pretty_path = Path(self.cfg.out_folder) / "pretty" / out_path.name
             if pretty_path.exists() and not opts.force:
@@ -294,8 +315,9 @@ class Pipeline:
                 )
                 atomic_write_text(pretty_path, pretty_md)
                 log.info(f"pretty: {pretty_path}")
+                pretty_written = True
 
-        return out_path, raw_path
+        return out_path, raw_path, pretty_written
 
     # --- fresh audio (--text / full) staged pipeline --------------------
 
@@ -347,13 +369,17 @@ class Pipeline:
                 )
                 return result
 
-            if opts.mode == "text":
+            if opts.mode == "text" and not opts.want_diarize:
                 asr = _run_asr()
                 doc = merge_stage.build_text_doc(
                     asr, content_hash=task.content_hash, source_name=task.source_name,
                     source_path=str(task.path), duration_sec=ctx.duration,
                 )
             else:
+                # ASR ∥ diarize: plain "full", "diarize" (today's fresh-audio path,
+                # pending its Task-6 rewrite into a post-pass), and "text" combined
+                # with --diarize (want_diarize) all diarize alongside ASR here.
+                ctx.diarized = True
                 self.reporter.stage(task.content_hash, "DIARIZE", "diarizing")
                 # Best-effort overlap: run diarization on a worker thread while ASR
                 # runs here. Both read the same wav and are independent; merge waits
@@ -385,18 +411,32 @@ class Pipeline:
     def _safe_stage_c(self, ctx: _Ctx, opts: RunOptions) -> None:
         task, log = ctx.task, ctx.log
         try:
+            summarized = False
             if opts.mode == "full":
                 self.reporter.stage(task.content_hash, "SUMMARY", "summarizing")
                 ctx.doc.summary = self.summarize(ctx.doc, self.cfg, log)
+                summarized = True
             self.reporter.stage(task.content_hash, "RENDER", "rendering")
-            out_path, raw_path = self._write_outputs(ctx.doc, task, opts, log)
+            out_path, raw_path, pretty_written = self._write_outputs(ctx.doc, task, opts, log)
             elapsed = time.monotonic() - ctx.started
+
+            existing = self.manifest.get(task.content_hash)
+            stages = dict(existing.stages) if existing else default_stages()
+            stages = _with_stage(stages, "text", "done")
+            if ctx.diarized:
+                stages = _with_stage(stages, "diarize", "done")
+            if summarized:
+                stages = _with_stage(stages, "summary", "done")
+            if pretty_written:
+                stages = _with_stage(stages, "pretty", "done")
+
             self.manifest.upsert(
                 ManifestEntry(
                     content_hash=task.content_hash, source_name=task.source_name, status="done",
                     language=ctx.doc.language, num_speakers=ctx.doc.num_speakers,
                     duration_sec=ctx.doc.duration_sec, out_path=str(out_path), raw_path=str(raw_path),
                     log_path=str(ctx.log_path), elapsed_sec=elapsed, error=None, updated_at=utcnow_iso(),
+                    stages=stages,
                 )
             )
             log.info(f"done (elapsed={elapsed:.1f}s)")
@@ -495,14 +535,21 @@ class Pipeline:
                 doc.summary = self.summarize(doc, self.cfg, log)
                 atomic_write_json(raw_path, doc.to_dict())
             self.reporter.stage(doc.content_hash, "RENDER", "rendering")
-            out_path, raw_path_out = self._write_outputs(doc, task, opts, log)
+            out_path, raw_path_out, pretty_written = self._write_outputs(doc, task, opts, log)
             elapsed = time.monotonic() - started
+            existing = self.manifest.get(doc.content_hash)
+            stages = dict(existing.stages) if existing else default_stages()
+            if opts.mode != "rerender":
+                stages = _with_stage(stages, "summary", "done")
+            if pretty_written:
+                stages = _with_stage(stages, "pretty", "done")
             self.manifest.upsert(
                 ManifestEntry(
                     content_hash=doc.content_hash, source_name=doc.source_name, status="done",
                     language=doc.language, num_speakers=doc.num_speakers, duration_sec=doc.duration_sec,
                     out_path=str(out_path), raw_path=str(raw_path_out), log_path=str(log_path),
                     elapsed_sec=elapsed, error=None, updated_at=utcnow_iso(),
+                    stages=stages,
                 )
             )
             log.info(f"done (elapsed={elapsed:.1f}s)")
