@@ -25,11 +25,12 @@ from . import naming
 from .config import Config
 from .logging_setup import per_file_log_path, setup_file_logger
 from .manifest import Manifest
-from .models import FileTask, ManifestEntry, RawDoc, StageState, default_stages
+from .models import FileTask, ManifestEntry, RawDoc, StageState, default_stages, stage_status
 from .progress import NullReporter
 from .stages import asr_mlx, audio as audio_stage, diarize as diarize_stage
 from .stages import langdetect as langdetect_stage
 from .stages import merge as merge_stage
+from .stages import mono_precheck
 from .stages import pretty as pretty_stage
 from .stages import render as render_stage
 from .stages import summarize as summarize_stage
@@ -193,6 +194,7 @@ class _Ctx:
     language: str | None = None  # resolved in stage A: forced code, or detected, or None (auto)
     doc: RawDoc | None = None
     diarized: bool = False  # set in stage B: did this run take the ASR-parallel-diarize path?
+    diarize_skip_reason: str | None = None  # e.g. "mono" when pre-check skipped full pyannote
 
 
 class Pipeline:
@@ -376,31 +378,45 @@ class Pipeline:
                     source_path=str(task.path), duration_sec=ctx.duration,
                 )
             else:
-                # ASR ∥ diarize: plain "full", "diarize" (today's fresh-audio path,
-                # pending its Task-6 rewrite into a post-pass), and "text" combined
-                # with --diarize (want_diarize) all diarize alongside ASR here.
-                ctx.diarized = True
-                self.reporter.stage(task.content_hash, "DIARIZE", "diarizing")
-                # Best-effort overlap: run diarization on a worker thread while ASR
-                # runs here. Both read the same wav and are independent; merge waits
-                # for both. Quality is unaffected (same models, same params).
-                with ThreadPoolExecutor(max_workers=1) as diar_pool:
-                    diar_future = diar_pool.submit(
-                        self.diarize, ctx.wav_path, self.cfg.diarize_device,
-                        opts.speakers, opts.min_speakers, opts.max_speakers, log,
-                    )
-                    asr = _run_asr()
-                    diar = diar_future.result()
-                self.reporter.stage(task.content_hash, "MERGE", "merging speakers")
-                doc = self.merge(
-                    asr, diar, self.cfg.mono_threshold, opts.names, log,
-                    content_hash=task.content_hash, source_name=task.source_name,
-                    source_path=str(task.path), duration_sec=ctx.duration,
-                    min_speaker_share=self.cfg.min_speaker_share,
+                # ASR ∥ diarize for full / text+--diarize. Sample mono pre-check first;
+                # on clear monologue skip full-file pyannote (reason=mono).
+                self.reporter.stage(task.content_hash, "DIARIZE", "precheck")
+                mono = mono_precheck.is_likely_monologue(
+                    ctx.wav_path, ctx.duration, self.diarize, self.cfg.diarize_device, log,
                 )
-                if self.cfg.voiceprint_enabled:
-                    self.reporter.stage(task.content_hash, "VOICEID", "matching voices")
-                    self._apply_voiceprints(doc, log)
+                if mono is True:
+                    log.info("mono-precheck: monologue — skipping full diarize")
+                    asr = _run_asr()
+                    doc = merge_stage.build_text_doc(
+                        asr, content_hash=task.content_hash, source_name=task.source_name,
+                        source_path=str(task.path), duration_sec=ctx.duration,
+                    )
+                    ctx.diarize_skip_reason = "mono"
+                else:
+                    if mono is None:
+                        log.info("mono-precheck: inconclusive — running full diarize")
+                    ctx.diarized = True
+                    self.reporter.stage(task.content_hash, "DIARIZE", "diarizing")
+                    # Best-effort overlap: run diarization on a worker thread while ASR
+                    # runs here. Both read the same wav and are independent; merge waits
+                    # for both. Quality is unaffected (same models, same params).
+                    with ThreadPoolExecutor(max_workers=1) as diar_pool:
+                        diar_future = diar_pool.submit(
+                            self.diarize, ctx.wav_path, self.cfg.diarize_device,
+                            opts.speakers, opts.min_speakers, opts.max_speakers, log,
+                        )
+                        asr = _run_asr()
+                        diar = diar_future.result()
+                    self.reporter.stage(task.content_hash, "MERGE", "merging speakers")
+                    doc = self.merge(
+                        asr, diar, self.cfg.mono_threshold, opts.names, log,
+                        content_hash=task.content_hash, source_name=task.source_name,
+                        source_path=str(task.path), duration_sec=ctx.duration,
+                        min_speaker_share=self.cfg.min_speaker_share,
+                    )
+                    if self.cfg.voiceprint_enabled:
+                        self.reporter.stage(task.content_hash, "VOICEID", "matching voices")
+                        self._apply_voiceprints(doc, log)
             ctx.doc = doc
             log.info(f"ASR done: language={doc.language}, segments={len(doc.segments)}")
             return ctx
@@ -425,6 +441,8 @@ class Pipeline:
             stages = _with_stage(stages, "text", "done")
             if ctx.diarized:
                 stages = _with_stage(stages, "diarize", "done")
+            elif ctx.diarize_skip_reason:
+                stages = _with_stage(stages, "diarize", "skipped", reason=ctx.diarize_skip_reason)
             if summarized:
                 stages = _with_stage(stages, "summary", "done")
             if pretty_written:
@@ -512,6 +530,125 @@ class Pipeline:
                 fut.result()
 
         shutil.rmtree(tmp_root, ignore_errors=True)
+
+    # --- post-pass diarize on existing text raws (--diarize) -------------
+
+    def process_diarize_one(
+        self, task: FileTask, opts: RunOptions, idx: int, total: int, tmp_root: Path
+    ) -> None:
+        """Add speakers to an existing text raw without re-running ASR."""
+        h8 = hash8(task.content_hash)
+        log_path = per_file_log_path(Path(self.cfg.logs_folder), task.source_name, h8)
+        log = setup_file_logger(log_path, console=self.console_logs)
+        log.info(f"taken: {task.source_name} (hash {h8}) mode=diarize (post-pass)")
+        started = time.monotonic()
+        self._mark_in_progress(task.content_hash, task.source_name, log_path)
+        self.reporter.file_start(task.content_hash, idx, total, task.source_name, task.audio_sec)
+
+        existing = self.manifest.get(task.content_hash)
+        stages = dict(existing.stages) if existing else default_stages()
+        raw_path = Path(self.cfg.systems_folder) / "raw" / f"{hash_hex(task.content_hash)}.json"
+
+        def _finish_skip(reason: str, message: str) -> None:
+            nonlocal stages
+            stages = _with_stage(stages, "diarize", "skipped", reason=reason)
+            log.info(message)
+            self.manifest.upsert(
+                ManifestEntry(
+                    content_hash=task.content_hash,
+                    source_name=task.source_name,
+                    status="done",
+                    out_path=existing.out_path if existing else None,
+                    raw_path=str(raw_path) if raw_path.exists() else (existing.raw_path if existing else None),
+                    log_path=str(log_path),
+                    elapsed_sec=time.monotonic() - started,
+                    error=None,
+                    updated_at=utcnow_iso(),
+                    stages=stages,
+                    language=existing.language if existing else None,
+                    num_speakers=existing.num_speakers if existing else None,
+                    duration_sec=existing.duration_sec if existing else None,
+                )
+            )
+            self.reporter.file_done(task.content_hash, time.monotonic() - started, existing.out_path if existing else "")
+
+        try:
+            text_done = existing is not None and stage_status(existing, "text") == "done"
+            if not raw_path.exists() or not text_done:
+                _finish_skip("no_transcript", "skip diarize: no transcript (text stage not done or raw missing)")
+                return
+
+            doc = load_raw_doc(raw_path)
+            self.reporter.stage(task.content_hash, "FFMPEG", "normalizing")
+            wav_path, duration = self.normalize(task.path, tmp_root)
+            log.info(f"ffmpeg -> 16k mono wav, duration={duration:.1f}s")
+
+            self.reporter.stage(task.content_hash, "DIARIZE", "precheck")
+            mono = mono_precheck.is_likely_monologue(
+                wav_path, duration, self.diarize, self.cfg.diarize_device, log,
+            )
+            if mono is True:
+                _finish_skip("mono", "mono-precheck: monologue — skipping full diarize")
+                return
+            if mono is None:
+                log.info("mono-precheck: inconclusive — running full diarize")
+
+            self.reporter.stage(task.content_hash, "DIARIZE", "diarizing")
+            diar = self.diarize(
+                wav_path, self.cfg.diarize_device,
+                opts.speakers, opts.min_speakers, opts.max_speakers, log,
+            )
+            self.reporter.stage(task.content_hash, "MERGE", "merging speakers")
+            summary = doc.summary
+            created_at = doc.created_at
+            merged = self.merge(
+                merge_stage.asr_from_doc(doc), diar, self.cfg.mono_threshold, opts.names, log,
+                content_hash=doc.content_hash, source_name=doc.source_name,
+                source_path=doc.source_path, duration_sec=doc.duration_sec,
+                min_speaker_share=self.cfg.min_speaker_share,
+            )
+            merged.summary = summary
+            merged.created_at = created_at
+            if self.cfg.voiceprint_enabled:
+                self.reporter.stage(task.content_hash, "VOICEID", "matching voices")
+                self._apply_voiceprints(merged, log)
+
+            self.reporter.stage(task.content_hash, "RENDER", "rendering")
+            out_path, raw_path_out, pretty_written = self._write_outputs(merged, task, opts, log)
+            stages = _with_stage(stages, "diarize", "done")
+            if pretty_written:
+                stages = _with_stage(stages, "pretty", "done")
+            elapsed = time.monotonic() - started
+            self.manifest.upsert(
+                ManifestEntry(
+                    content_hash=task.content_hash, source_name=task.source_name, status="done",
+                    language=merged.language, num_speakers=merged.num_speakers,
+                    duration_sec=merged.duration_sec, out_path=str(out_path), raw_path=str(raw_path_out),
+                    log_path=str(log_path), elapsed_sec=elapsed, error=None, updated_at=utcnow_iso(),
+                    stages=stages,
+                )
+            )
+            log.info(f"done (elapsed={elapsed:.1f}s)")
+            self.reporter.file_done(task.content_hash, elapsed, out_path)
+        except Exception as exc:  # noqa: BLE001
+            self._fail(task, log_path, log, exc)
+
+    def run_diarize_pass(self, tasks: list[FileTask], opts: RunOptions, jobs: int) -> None:
+        """Post-pass: diarize existing text raws (no ASR)."""
+        if not tasks:
+            return
+        tmp_root = Path(tempfile.mkdtemp(prefix="transcriber-diarize-"))
+        total = len(tasks)
+        try:
+            with ThreadPoolExecutor(max_workers=jobs) as pool:
+                list(
+                    pool.map(
+                        lambda it: self.process_diarize_one(it[1], opts, it[0], total, tmp_root),
+                        list(enumerate(tasks, start=1)),
+                    )
+                )
+        finally:
+            shutil.rmtree(tmp_root, ignore_errors=True)
 
     # --- existing raw JSON (--summary / --resummarize / --rerender) -----
 

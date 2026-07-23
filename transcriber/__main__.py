@@ -166,7 +166,10 @@ def cmd_run(cfg: Config, args, log) -> int:
             if tasks:
                 log.info("preparing models (first run may download several GB)…")
             _install_drain_handlers(pipeline, log)  # Ctrl-C = graceful drain (run_all honors it)
-            pipeline.run_all(tasks, opts, jobs=cfg.jobs)
+            if mode == "diarize":
+                pipeline.run_diarize_pass(tasks, opts, jobs=cfg.jobs)
+            else:
+                pipeline.run_all(tasks, opts, jobs=cfg.jobs)
         else:  # summary | resummarize | rerender
             raw_paths = list_raw_files(Path(cfg.systems_folder))
             if opts.only:

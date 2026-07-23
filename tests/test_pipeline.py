@@ -157,7 +157,21 @@ def _fake_asr():
 
 
 def _fake_diar():
-    return DiarResult(segments=[DiarSegment(0.0, 1.0, "SPEAKER_00")])
+    # Two speakers so sample mono-precheck does not skip full diarize in tests.
+    return DiarResult(
+        segments=[
+            DiarSegment(0.0, 0.5, "SPEAKER_00"),
+            DiarSegment(0.5, 1.0, "SPEAKER_01"),
+        ],
+        total_speech_sec={"SPEAKER_00": 0.5, "SPEAKER_01": 0.5},
+    )
+
+
+def _fake_diar_mono():
+    return DiarResult(
+        segments=[DiarSegment(0.0, 1.0, "SPEAKER_00")],
+        total_speech_sec={"SPEAKER_00": 1.0},
+    )
 
 
 def _make_pipeline(tmp_path, **stage_overrides):
@@ -254,14 +268,39 @@ def test_run_all_diarize_mode_diarizes_but_skips_summary(tmp_path):
     task = _task(path=tmp_path / "team call.m4a")
     task.path.write_bytes(b"fake audio")
 
-    pipeline.run_all([task], RunOptions(mode="diarize"), jobs=1)
+    # Joint path still used by run_all when mode=diarize (legacy); CLI uses post-pass.
+    pipeline.run_all([task], RunOptions(mode="diarize", want_diarize=True), jobs=1)
 
     entry = manifest.get(task.content_hash)
     assert entry.status == "done"
-    assert calls["diarize"] == 1
+    assert calls["diarize"] >= 1  # precheck window(s) + possibly full
     assert Path(entry.raw_path).exists()
     md = Path(entry.out_path).read_text(encoding="utf-8")
     assert "### Summary" not in md
+
+
+def test_run_all_mono_precheck_skips_full_diarize(tmp_path, monkeypatch):
+    calls = {"diarize": 0}
+
+    def counting_mono(wav, device, s, mn, mx, log):
+        calls["diarize"] += 1
+        return _fake_diar_mono()
+
+    monkeypatch.setattr(
+        "transcriber.pipeline.mono_precheck.is_likely_monologue",
+        lambda *a, **k: True,
+    )
+
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, diarize=counting_mono)
+    task = _task(path=tmp_path / "memo.m4a")
+    task.path.write_bytes(b"fake audio")
+
+    pipeline.run_all([task], RunOptions(mode="full", want_diarize=True), jobs=1)
+
+    entry = manifest.get(task.content_hash)
+    assert entry.stages["diarize"].status == "skipped"
+    assert entry.stages["diarize"].reason == "mono"
+    assert calls["diarize"] == 0  # precheck short-circuited; full diarize never called
 
 
 def test_run_all_stage_a_failure_marks_failed_and_does_not_crash_others(tmp_path):
@@ -692,3 +731,85 @@ def test_no_pretty_flag_skips_pretty_file(tmp_path):
 
     assert called["n"] == 0
     assert not (tmp_path / "out" / "pretty").exists()
+
+
+# --- post-pass --diarize -------------------------------------------------
+
+def _seed_text_raw(tmp_path, cfg, manifest, *, name="call.m4a", content_hash="blake2b:post1"):
+    from transcriber.models import AsrInfo, ManifestEntry, Segment, StageState, Word, default_stages
+    from transcriber.pipeline import atomic_write_json, hash_hex, utcnow_iso
+
+    audio = tmp_path / name
+    audio.write_bytes(b"fake")
+    raw_path = Path(cfg.systems_folder) / "raw" / f"{hash_hex(content_hash)}.json"
+    doc = RawDoc(
+        schema=1, content_hash=content_hash, source_name=name, source_path=str(audio),
+        language="ru", duration_sec=3.0, num_speakers=0, is_monologue=True,
+        asr=AsrInfo("mlx", "large-v3", False), created_at="2026-01-01T00:00:00Z",
+        segments=[
+            Segment(0.0, 0.5, None, "hello", words=[Word(w="hello", start=0.0, end=0.5)]),
+            Segment(0.5, 1.0, None, "there", words=[Word(w="there", start=0.5, end=1.0)]),
+        ],
+        summary=None,
+    )
+    atomic_write_json(raw_path, doc.to_dict())
+    stages = default_stages()
+    stages["text"] = StageState(status="done", updated_at=utcnow_iso())
+    manifest.upsert(ManifestEntry(
+        content_hash=content_hash, source_name=name, status="done",
+        raw_path=str(raw_path), stages=stages, updated_at=utcnow_iso(),
+    ))
+    return FileTask(path=audio, content_hash=content_hash, source_name=name, status="to_do", reason="diarize pending")
+
+
+def test_diarize_pass_no_transcript_skips(tmp_path):
+    cfg, manifest, pipeline = _make_pipeline(tmp_path)
+    task = _task(path=tmp_path / "orphan.m4a", content_hash="blake2b:orphan")
+    task.path.write_bytes(b"x")
+
+    pipeline.run_diarize_pass([task], RunOptions(mode="diarize", want_diarize=True), jobs=1)
+
+    entry = manifest.get(task.content_hash)
+    assert entry.stages["diarize"].status == "skipped"
+    assert entry.stages["diarize"].reason == "no_transcript"
+
+
+def test_diarize_pass_merges_speakers_onto_existing_raw(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "transcriber.pipeline.mono_precheck.is_likely_monologue",
+        lambda *a, **k: False,
+    )
+    cfg, manifest, pipeline = _make_pipeline(tmp_path)
+    task = _seed_text_raw(tmp_path, cfg, manifest)
+
+    pipeline.run_diarize_pass([task], RunOptions(mode="diarize", want_diarize=True), jobs=1)
+
+    entry = manifest.get(task.content_hash)
+    assert entry.stages["diarize"].status == "done"
+    assert entry.stages["text"].status == "done"
+    doc = RawDoc.from_dict(json.loads(Path(entry.raw_path).read_text(encoding="utf-8")))
+    speakers = {seg.speaker for seg in doc.segments if seg.speaker}
+    assert speakers == {"SPEAKER_00", "SPEAKER_01"}
+    assert doc.num_speakers == 2
+
+
+def test_diarize_pass_mono_skips_full_pyannote(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "transcriber.pipeline.mono_precheck.is_likely_monologue",
+        lambda *a, **k: True,
+    )
+    calls = {"n": 0}
+
+    def counting(*a, **k):
+        calls["n"] += 1
+        return _fake_diar_mono()
+
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, diarize=counting)
+    task = _seed_text_raw(tmp_path, cfg, manifest, content_hash="blake2b:mono")
+
+    pipeline.run_diarize_pass([task], RunOptions(mode="diarize", want_diarize=True), jobs=1)
+
+    entry = manifest.get(task.content_hash)
+    assert entry.stages["diarize"].status == "skipped"
+    assert entry.stages["diarize"].reason == "mono"
+    assert calls["n"] == 0

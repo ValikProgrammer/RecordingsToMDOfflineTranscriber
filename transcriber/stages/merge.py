@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from ..models import (
     AsrInfo,
     AsrResult,
+    AsrSegment,
+    AsrWord,
     DiarResult,
     RawDoc,
     Segment,
@@ -251,4 +253,23 @@ def build_text_doc(
         segments=segments,
         speakers_meta=[],
         summary=None,
+    )
+
+
+def asr_from_doc(doc: RawDoc) -> AsrResult:
+    """Rebuild an AsrResult from an existing raw doc so merge can re-attach speakers."""
+    return AsrResult(
+        language=doc.language,
+        backend=doc.asr.backend,
+        model=doc.asr.model,
+        turbo=doc.asr.turbo,
+        segments=[
+            AsrSegment(
+                start=s.start,
+                end=s.end,
+                text=s.text,
+                words=[AsrWord(w=w.w, start=w.start, end=w.end) for w in s.words],
+            )
+            for s in doc.segments
+        ],
     )
