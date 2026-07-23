@@ -15,7 +15,7 @@ from .manifest import Manifest
 from .pipeline import (
     Pipeline,
     filter_tasks,
-    filter_unsummarized,
+    filter_need_stage,
     list_raw_files,
     load_raw_doc,
     resolve_raw_by_query,
@@ -176,10 +176,12 @@ def cmd_run(cfg: Config, args, log) -> int:
                 raw_paths = [p for p in raw_paths if opts.only in p.stem]
             if mode == "summary" and not opts.force:
                 before = len(raw_paths)
-                raw_paths = filter_unsummarized(raw_paths)
+                raw_paths = filter_need_stage(manifest, raw_paths, "summary", force=False)
                 skipped = before - len(raw_paths)
                 if skipped:
                     log.info(f"skipping {skipped} already-summarized (use --force to redo)")
+            elif mode == "summary" and opts.force:
+                raw_paths = filter_need_stage(manifest, raw_paths, "summary", force=True)
             log.info(f"{len(raw_paths)} raw files to process (mode={mode})")
             total_audio = sum(_raw_duration(p) for p in raw_paths)
             reporter.start_batch(total_audio, len(raw_paths))

@@ -100,11 +100,22 @@ def _write_raw(cfg, content_hash, summary):
 
 
 def test_cmd_run_summary_skips_already_summarized_unless_forced(tmp_path, monkeypatch):
-    from transcriber.models import Summary
+    from transcriber.models import ManifestEntry, StageState, Summary, default_stages
+    from transcriber.pipeline import utcnow_iso
 
     cfg = _cfg(tmp_path)
     _write_raw(cfg, "blake2b:pending", None)
     _write_raw(cfg, "blake2b:done", Summary(title="T", text="already summarized"))
+
+    manifest = Manifest(Path(cfg.systems_folder) / "manifest.json")
+    for ch, summary_status in (("blake2b:pending", "pending"), ("blake2b:done", "done")):
+        stages = default_stages()
+        stages["text"] = StageState(status="done", updated_at=utcnow_iso())
+        stages["summary"] = StageState(status=summary_status, updated_at=utcnow_iso())
+        manifest.upsert(ManifestEntry(
+            content_hash=ch, source_name=f"{ch}.m4a", status="done",
+            stages=stages, updated_at=utcnow_iso(),
+        ))
 
     captured = {}
     monkeypatch.setattr(
@@ -114,7 +125,7 @@ def test_cmd_run_summary_skips_already_summarized_unless_forced(tmp_path, monkey
     log = setup_run_logger(Path(cfg.logs_folder))
 
     cmd_run(cfg, parse_args(["--summary"]), log)
-    assert len(captured["paths"]) == 1  # only the unsummarized raw doc
+    assert len(captured["paths"]) == 1  # only summary-pending per manifest
 
     captured.clear()
 

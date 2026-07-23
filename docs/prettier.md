@@ -32,18 +32,17 @@ python -m transcriber --summary --pretty       # summarize + pretty
 
 ## Incremental `--pretty`
 
-The pretty rewrite is the expensive LLM step, so it is skipped when the output
-already exists. The signal is pure file existence — `out/pretty/<name>.md` —
-not the manifest.
+The pretty rewrite is the expensive LLM step, so it is skipped when the
+manifest `pretty` stage is already `done`. `--force` regenerates.
 
-- `--pretty` → skip files whose pretty md already exists.
+- `--pretty` → skip when `stages.pretty` is `done`.
 - `--pretty --force` → regenerate every pretty (same `--force` as
   [`--summary`](Summary.md)).
 
-Skipped files are logged (`pretty exists, skipping (use --force to redo)`).
+Skipped files are logged (`pretty stage done, skipping (use --force to redo)`).
 
-The output filename is stable across runs (it reuses the doc's `out_path` from
-the manifest), so the existence check is reliable.
+The output still lands at `out/pretty/<name>.md` (stable name from the
+manifest `out_path`).
 
 ### Combining with `--summary`
 

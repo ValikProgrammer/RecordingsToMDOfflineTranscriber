@@ -45,19 +45,22 @@ python -m transcriber --resummarize
 
 ### Incremental `--summary`
 
-`--summary` mirrors the transcriber's skip-done behaviour: it summarizes only
-raw docs whose `summary` is still empty. An interrupted `--summary` run resumes
-without redoing finished files. The "already done" signal is the `summary`
-field inside each `raw/<hash>.json` — no extra manifest state.
+`--summary` mirrors skip-done behaviour using the **manifest** `summary`
+stage (schema v2). Only raw docs whose stage is `pending` (or `failed`) are
+summarized. An interrupted run resumes without redoing finished stages.
 
-- `--summary` → skip raw docs that already have a summary.
-- `--summary --force` → summarize every raw doc.
+- `--summary` → skip when `stages.summary` is `done`.
+- `--summary --force` → summarize every selected raw (ignore stage done).
 - `--resummarize` → re-summarize all (unchanged; equivalent to `--summary
   --force`).
 - `--rerender` → re-render the `.md` only, never summarizes.
 
 Skipped files are logged (`skipping N already-summarized (use --force to
 redo)`), not silently dropped.
+
+Legacy manifests with root `status=done` migrate to `text=done` only;
+`summary` starts `pending`, so the next `--summary` will process those files
+even if the raw already contains a summary object.
 
 ### Flags
 

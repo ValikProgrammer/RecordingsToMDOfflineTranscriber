@@ -1,88 +1,86 @@
 # Diarization (`--diarize`) + voiceprint enrollment
 
-Speaker diarization as its own deliverable, decoupled from summarization, plus
-commands to seed the voiceprint store so `SPEAKER_00` becomes a stable name
- across recordings.
+Speaker labels on transcripts, as their own stage in the multi-stage manifest.
+Standalone `--diarize` is a **post-pass**: it attaches speakers to an existing
+text raw (no ASR). Sample-based mono pre-check skips full-file pyannote on
+solo recordings.
 
-## `--diarize` mode
+## Stages (manifest)
 
-Fresh-audio pipeline: `normalize → ASR + diarize + merge + voiceprints →
-render`. No summary, no pretty. Produces a raw doc with speakers and
-`summary=None`, plus a speaker-tagged markdown transcript.
+Each file tracks `text` / `diarize` / `summary` / `pretty`. Legacy
+`status=done` migrates to **`text=done` only**; other stages start `pending`.
+
+## `--diarize` (post-pass)
+
+Needs a completed `text` stage and `systems/raw/<hash>.json`. Uses the source
+audio again (normalize → mono pre-check → pyannote → merge into the raw →
+re-render markdown). Does **not** re-run Whisper.
 
 ```bash
-# transcript + speakers, no summary
+# speakers on already-transcribed files
 python -m transcriber --diarize --input-folder ./audio
 
-# name the speakers by dominance order (also auto-enrolls their voiceprints)
-python -m transcriber --diarize --names "dad,kate"
+# optional names + voiceprint enroll
+python -m transcriber --diarize --names "мама,Арина" --input-folder ./audio
 ```
 
-Then finish the same raw docs separately:
+| Situation | Manifest |
+|-----------|----------|
+| No raw / `text` not done | `diarize=skipped`, reason `no_transcript` |
+| Mono pre-check: one voice | `diarize=skipped`, reason `mono` (no full pyannote) |
+| Multi / pre-check unsure | full diarize → `diarize=done` |
+
+`--force` redoes `done` / `skipped` diarize stages.
+
+## Transcript + speakers in one shot
 
 ```bash
-python -m transcriber --summary          # fills the summary
-python -m transcriber --pretty --summary # + LLM-cleaned transcript
+python -m transcriber --text --diarize --input-folder ./audio
+# or full pipeline (also summarizes):
+python -m transcriber --input-folder ./audio
 ```
 
-### Why a separate mode
+ASR and diarize run in parallel on the same wav (after mono pre-check).
 
-`full` bundles `diarize + summary`. Diarization (pyannote, ~1–2 GB) is only worth
-it on real dialogue; on monologues `mono_threshold` collapses everyone into one
-speaker, so it's paid work thrown away. `--diarize` lets you decide "speakers or
-not" at transcription time — mass-run `--text` cheaply, run `--diarize` only on
-recordings where "who said what" matters.
+## Timecodes vs speakers
 
-The speaker decision has to be made now, not later: diarization needs the
-waveform, and a `--text` raw carries no speakers. A file already processed as
-`--text` is `done` with no speakers, so `--diarize` will skip it — re-run it to
-diarize. (Auto-detecting monologues from samples to skip pyannote entirely is
-[issue #35](https://github.com/ValikProgrammer/RecordingsToMDOfflineTranscriber/issues/35).)
+**Timecodes** (`start`/`end` on segments) come from ASR. Diarization only
+answers *who* spoke; merge attaches labels to existing segments.
 
-Resume: like `full`/`--text`, already-`done` content hashes are skipped.
+## Then summary / pretty
+
+```bash
+python -m transcriber --summary
+python -m transcriber --pretty --summary
+```
+
+Those modes gate on **manifest stages**, not on empty raw fields / file
+existence.
 
 ## Voiceprints
 
-Speaker embeddings are computed for free during diarization and stored on the raw
-doc (`speakers_meta[*].embedding`). Matching a new speaker is cosine similarity
-against a small per-name store under `systems/voiceprints/` — cheap, no extra
-model. With voiceprints on (`voiceprint_enabled=true`), a named speaker in one
-recording is recognized automatically in the next.
+Embeddings live on `speakers_meta[*].embedding` after a successful diarize.
 
-### Enroll from one recording — `--enroll NAME`
+### `--enroll NAME`
 
-Takes the dominant speaker of each audio file in the input folder and enrolls it
-under `NAME`. For clean single-speaker samples.
+Dominant speaker of each sample in the input folder → store under `NAME`.
 
-```bash
-python -m transcriber --enroll "Dad" --input-folder ./samples/mama
-```
+### `--enroll-raw PATH|NAME`
 
-### Enroll from a labeled multi-speaker raw — `--enroll-raw PATH|NAME`
-
-Reads a raw doc whose speakers are already named (e.g. from `--diarize --names`,
-or hand-corrected) and enrolls every named speaker's embedding at once. No audio,
-no pyannote — it reuses the embeddings already in the raw. One labeled dialog
-seeds several voices.
+Enroll every named speaker from a labeled raw (no audio / no pyannote).
 
 ```bash
-# by source-name / hash substring (searches systems/raw/*.json)
 python -m transcriber --enroll-raw "dialog with mama"
-
-# or a direct path to the raw JSON
 python -m transcriber --enroll-raw systems/raw/ab12cd34.json
 ```
 
-Speakers without a name, or without an embedding, are skipped.
-
 ## Code map
 
-- `transcriber/cli.py` — `--diarize`/`--diarization`, `--enroll`, `--enroll-raw`
-  flags; `resolve_mode` returns `"diarize"`.
-- `transcriber/pipeline.py` — mode dispatch (`_safe_stage_b` runs diarize+merge,
-  `_safe_stage_c` skips summary unless `full`); `resolve_raw_by_query` resolves
-  `--enroll-raw` targets.
-- `transcriber/stages/diarize.py` — pyannote wrapper + per-speaker embeddings.
-- `transcriber/voiceprints.py` — `VoiceprintStore`, `enroll_named_speakers`,
-  `identify_speakers`.
-- `transcriber/__main__.py` — `cmd_enroll`, `cmd_enroll_from_raw`.
+- `transcriber/cli.py` — `--diarize`, `want_diarize`, modes
+- `transcriber/pipeline.py` — `run_diarize_pass`, stage updates, `filter_need_stage`
+- `transcriber/stages/mono_precheck.py` — sample windows → mono decision
+- `transcriber/stages/diarize.py` — pyannote
+- `transcriber/voiceprints.py` — enroll / identify
+- `transcriber/manifest.py` — schema v2 stages + legacy migration
+
+Design: `docs/superpowers/specs/2026-07-22-multi-stage-manifest-and-post-diarize-design.md`

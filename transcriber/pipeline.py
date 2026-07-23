@@ -173,12 +173,41 @@ def resolve_raw_by_query(systems_folder: Path, query: str) -> list[Path]:
     return matches
 
 
-def filter_unsummarized(raw_paths: list[Path]) -> list[Path]:
-    """Keep only raw docs that don't have a summary yet (incremental --summary).
+def filter_need_stage(
+    manifest: Manifest,
+    raw_paths: list[Path],
+    stage: str,
+    *,
+    force: bool = False,
+) -> list[Path]:
+    """Keep raw paths whose manifest `stage` is pending/failed (or all if force).
 
-    Mirrors scan_and_hash's skip-done: a raw doc gets a summary written back once
-    summarized (full/--summary), so `summary is None` means "not summarized yet"."""
-    return [p for p in raw_paths if load_raw_doc(p).summary is None]
+    Manifest is the source of truth. If a raw has no manifest entry, create one
+    with text=done and other stages pending so orphan raws remain processable.
+    """
+    kept: list[Path] = []
+    for path in raw_paths:
+        try:
+            doc = load_raw_doc(path)
+        except (OSError, ValueError, KeyError):
+            continue
+        entry = manifest.get(doc.content_hash)
+        if entry is None:
+            stages = default_stages()
+            stages["text"] = StageState(status="done", updated_at=utcnow_iso())
+            entry = ManifestEntry(
+                content_hash=doc.content_hash,
+                source_name=doc.source_name,
+                status="done",
+                raw_path=str(path),
+                stages=stages,
+                updated_at=utcnow_iso(),
+            )
+            manifest.upsert(entry)
+        status = stage_status(entry, stage)
+        if force or status in ("pending", "failed"):
+            kept.append(path)
+    return kept
 
 
 @dataclass
@@ -302,10 +331,10 @@ class Pipeline:
         pretty_written = False
         if opts.pretty:
             pretty_path = Path(self.cfg.out_folder) / "pretty" / out_path.name
-            if pretty_path.exists() and not opts.force:
-                # Incremental: the pretty rewrite is the expensive LLM step; skip it
-                # when the output already exists. --force regenerates. Mirrors --summary.
-                log.info(f"pretty exists, skipping (use --force to redo): {pretty_path}")
+            existing = self.manifest.get(task.content_hash)
+            pretty_done = existing is not None and stage_status(existing, "pretty") == "done"
+            if pretty_done and not opts.force:
+                log.info(f"pretty stage done, skipping (use --force to redo): {pretty_path}")
             else:
                 pretty_body = self.pretty_transcript(doc, self.cfg, log)
                 pretty_md = self.render_markdown(

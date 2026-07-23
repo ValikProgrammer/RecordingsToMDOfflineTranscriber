@@ -369,19 +369,34 @@ def _write_raw_doc(tmp_path, cfg_systems_folder, content_hash="blake2b:raw1", so
     return raw_path, doc
 
 
-def test_filter_unsummarized_keeps_only_docs_without_summary(tmp_path):
-    from transcriber.models import Summary
-    from transcriber.pipeline import atomic_write_json, filter_unsummarized, hash_hex
+def test_filter_need_stage_uses_manifest_not_raw_summary(tmp_path):
+    from transcriber.models import ManifestEntry, StageState, Summary, default_stages
+    from transcriber.pipeline import atomic_write_json, filter_need_stage, hash_hex, utcnow_iso
 
-    cfg, _, _ = _make_pipeline(tmp_path)
-    no_summary_path, _ = _write_raw_doc(tmp_path, cfg.systems_folder, content_hash="blake2b:pending")
-    with_summary_path, doc = _write_raw_doc(tmp_path, cfg.systems_folder, content_hash="blake2b:done")
+    cfg, manifest, _ = _make_pipeline(tmp_path)
+    pending_path, _ = _write_raw_doc(tmp_path, cfg.systems_folder, content_hash="blake2b:pending")
+    done_path, doc = _write_raw_doc(tmp_path, cfg.systems_folder, content_hash="blake2b:done")
     doc.summary = Summary(title="T", text="already summarized")
-    atomic_write_json(with_summary_path, doc.to_dict())
+    atomic_write_json(done_path, doc.to_dict())
 
-    result = filter_unsummarized([no_summary_path, with_summary_path])
+    # Manifest says summary done for blake2b:done even if we only care about stages
+    for path, ch, summary_status in (
+        (pending_path, "blake2b:pending", "pending"),
+        (done_path, "blake2b:done", "done"),
+    ):
+        stages = default_stages()
+        stages["text"] = StageState(status="done", updated_at=utcnow_iso())
+        stages["summary"] = StageState(status=summary_status, updated_at=utcnow_iso())
+        manifest.upsert(ManifestEntry(
+            content_hash=ch, source_name=f"{ch}.m4a", status="done",
+            raw_path=str(path), stages=stages, updated_at=utcnow_iso(),
+        ))
 
-    assert result == [no_summary_path]
+    result = filter_need_stage(manifest, [pending_path, done_path], "summary", force=False)
+    assert result == [pending_path]
+
+    forced = filter_need_stage(manifest, [pending_path, done_path], "summary", force=True)
+    assert set(forced) == {pending_path, done_path}
 
 
 def test_process_existing_raw_resummarize_calls_summarize_not_asr(tmp_path):
