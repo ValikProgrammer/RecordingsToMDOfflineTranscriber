@@ -173,8 +173,8 @@ edited files refer to the trimmed audio, not the original recording.
 `.md` docs. The pipeline keeps a meaningful source filename as the title but
 falls back to an LLM title only for names it recognises as "technical"; device
 auto-names it doesn't recognise (`Dec 6, 23 57`, `New Recording 5`) leak through
-as ugly titles. This pass fixes them after the fact. Source audio is never
-touched, and the original name stays in each doc's `Source file:` frontmatter.
+as ugly titles. This pass fixes them after the fact — and renames the **source
+audio** to match, so the recording and its note stay in sync.
 
 Three stages so the model only reads summaries for the subset that needs it:
 
@@ -184,18 +184,29 @@ python -m transcriber.rename --classify --folder ./out
 # review/edit rename_plan.json: flip "action" between "rename"/"keep"
 
 # 2. propose — for the flagged subset, LLM reads name + summary + topics and
-#    proposes new_title/new_name
+#    proposes new_title / new_name / new_audio_name
 python -m transcriber.rename --propose
-# review/edit new_name / new_title
+# review/edit new_name / new_title / new_audio_name
 
-# 3. apply — renames the .md (collision-safe), rewrites the in-doc Title/heading,
-#    and renames + retitles the out/pretty/ twin
+# 3. apply — renames the source audio, the .md (collision-safe) and its
+#    out/pretty/ twin, and rewrites the in-doc Title / heading / Source file;
+#    also syncs systems/manifest.json
 python -m transcriber.rename --apply
 ```
 
+The filename stays `YYYY-MM-DD — <title>.<ext>` (audio gets the same base as the
+`.md`, its own extension). The LLM only proposes the title text, never the date:
+the date is resolved algorithmically — frontmatter `Date:` (from Obsidian) →
+date in the current filename → file mtime. The source audio is located via each
+doc's `Source file:` frontmatter, in `--audio-folder` (default config
+`input_folder`). If the audio is missing, the `.md` is still renamed and its
+`Source file:` is left as-is.
+
 Flags: `--folder` (docs folder, default `./out`), `--plan` (default
-`rename_plan.json`), `--batch-size` (files per LLM call, default `576`),
-`--model` (defaults to config `llm_model`), `--pretty-subdir` (default `pretty`).
+`rename_plan.json`), `--audio-folder` (default config `input_folder`),
+`--no-manifest` (skip the manifest sync), `--batch-size` (files per LLM call,
+default `576`), `--model` (defaults to config `llm_model`), `--pretty-subdir`
+(default `pretty`).
 
 Known limitation: it does not update Obsidian `[[old name]]` backlinks, so run it
 before cross-linking freshly generated notes.

@@ -26,6 +26,7 @@ _DOC = """---
 Title: "Dec 6, 23 57"
 Date: 2026-07-20
 Language: RU
+Source file: "Dec 6, 23.57.m4a"
 ---
 
 # Dec 6, 23 57
@@ -133,7 +134,9 @@ def test_apply_entry_renames_and_rewrites_twin(tmp_path):
         "new_title": "Документы за границу",
         "new_name": "2026-07-20 — Документы за границу.md",
     }
-    assert rename.apply_entry(entry, folder, "pretty", log=lambda *a: None) is True
+    audio = tmp_path / "audio"
+    audio.mkdir()
+    assert rename.apply_entry(entry, folder, "pretty", audio, log=lambda *a: None) is not None
 
     new = folder / "2026-07-20 — Документы за границу.md"
     assert new.exists()
@@ -157,7 +160,7 @@ def test_apply_plan_skips_keep_and_counts_renames(tmp_path):
             {"file": "2026-07-20 — Good name.md", "action": "keep"},
         ],
     }
-    applied = rename.apply_plan(plan, folder, "pretty", log=lambda *a: None)
+    applied = rename.apply_plan(plan, folder, "pretty", tmp_path / "audio", log=lambda *a: None)
     assert applied == 1
     assert (folder / "2026-07-20 — Хорошее имя.md").exists()
     assert (folder / "2026-07-20 — Good name.md").exists()
@@ -172,7 +175,7 @@ def test_apply_entry_collision_does_not_clobber(tmp_path):
         "file": old, "action": "rename",
         "new_title": "Taken", "new_name": "2026-07-20 — Taken.md",
     }
-    rename.apply_entry(entry, folder, "pretty", log=lambda *a: None)
+    rename.apply_entry(entry, folder, "pretty", tmp_path / "audio", log=lambda *a: None)
     # original "Taken" file untouched
     assert (folder / "2026-07-20 — Taken.md").read_text(encoding="utf-8") == "existing\n"
     # renamed file landed on a collision-suffixed path
@@ -192,6 +195,13 @@ def test_build_classify_plan_writes_actions(monkeypatch, tmp_path):
     assert actions["2026-07-20 — Natalia scheduler.md"] == "keep"
 
 
+def test_parse_frontmatter_date():
+    from datetime import date
+
+    assert rename.parse_frontmatter_date(_DOC) == date(2026, 7, 20)
+    assert rename.parse_frontmatter_date("# no frontmatter\n") is None
+
+
 def test_fill_proposals_sets_new_name_from_date_in_filename(monkeypatch, tmp_path):
     folder = tmp_path / "out"
     _write(folder / "2026-07-20 — Dec 6.md", _DOC)
@@ -204,3 +214,109 @@ def test_fill_proposals_sets_new_name_from_date_in_filename(monkeypatch, tmp_pat
     e = plan["files"][0]
     assert e["new_title"] == "Документы за границу"
     assert e["new_name"] == "2026-07-20 — Документы за границу.md"
+
+
+def test_fill_proposals_prefers_frontmatter_date_over_filename(monkeypatch, tmp_path):
+    # filename says May 01, frontmatter (Obsidian) says Jul 20 -> frontmatter wins
+    folder = tmp_path / "out"
+    _write(folder / "2026-05-01 — junk.md", _DOC)  # _DOC frontmatter Date is 2026-07-20
+    _install_fake_ollama(monkeypatch, [json.dumps({"A": "Настоящее имя"})])
+    plan = {
+        "folder": str(folder),
+        "files": [{"file": "2026-05-01 — junk.md", "action": "rename", "reason": "x"}],
+    }
+    rename.fill_proposals(plan, folder, "m", LOG, batch_size=576)
+    assert plan["files"][0]["new_name"] == "2026-07-20 — Настоящее имя.md"
+
+
+# --- source audio ------------------------------------------------------------
+
+def test_parse_source_file():
+    assert rename.parse_source_file(_DOC) == "Dec 6, 23.57.m4a"
+    assert rename.parse_source_file("# no frontmatter\n") is None
+
+
+def test_fill_proposals_sets_audio_name_matching_md(monkeypatch, tmp_path):
+    folder = tmp_path / "out"
+    _write(folder / "2026-07-20 — Dec 6.md", _DOC)  # Source file: Dec 6, 23.57.m4a
+    _install_fake_ollama(monkeypatch, [json.dumps({"A": "Документы за границу"})])
+    plan = {
+        "folder": str(folder),
+        "files": [{"file": "2026-07-20 — Dec 6.md", "action": "rename", "reason": "x"}],
+    }
+    rename.fill_proposals(plan, folder, "m", LOG, batch_size=576)
+    e = plan["files"][0]
+    assert e["source_file"] == "Dec 6, 23.57.m4a"
+    # same base as the .md, but the audio extension
+    assert e["new_audio_name"] == "2026-07-20 — Документы за границу.m4a"
+
+
+def test_apply_entry_renames_audio_and_syncs_source_file(tmp_path):
+    folder = tmp_path / "out"
+    audio = tmp_path / "audio"
+    old = "2026-07-20 — Dec 6.md"
+    _write(folder / old, _DOC)
+    _write(audio / "Dec 6, 23.57.m4a", "AUDIO")
+
+    entry = {
+        "file": old, "action": "rename",
+        "new_title": "Документы за границу",
+        "new_name": "2026-07-20 — Документы за границу.md",
+        "source_file": "Dec 6, 23.57.m4a",
+        "new_audio_name": "2026-07-20 — Документы за границу.m4a",
+    }
+    result = rename.apply_entry(entry, folder, "pretty", audio, log=lambda *a: None)
+
+    new_audio = audio / "2026-07-20 — Документы за границу.m4a"
+    assert new_audio.exists()
+    assert new_audio.read_text(encoding="utf-8") == "AUDIO"
+    assert not (audio / "Dec 6, 23.57.m4a").exists()
+    assert result["new_audio"] == "2026-07-20 — Документы за границу.m4a"
+    # md's Source file: now points at the renamed audio
+    md = (folder / "2026-07-20 — Документы за границу.md").read_text(encoding="utf-8")
+    assert 'Source file: "2026-07-20 — Документы за границу.m4a"' in md
+
+
+def test_apply_entry_missing_audio_still_renames_md(tmp_path):
+    folder = tmp_path / "out"
+    audio = tmp_path / "audio"
+    audio.mkdir()  # empty — audio not present
+    old = "2026-07-20 — Dec 6.md"
+    _write(folder / old, _DOC)
+    entry = {
+        "file": old, "action": "rename",
+        "new_title": "Документы за границу",
+        "new_name": "2026-07-20 — Документы за границу.md",
+        "source_file": "Dec 6, 23.57.m4a",
+        "new_audio_name": "2026-07-20 — Документы за границу.m4a",
+    }
+    result = rename.apply_entry(entry, folder, "pretty", audio, log=lambda *a: None)
+    assert result["new_audio"] is None
+    md = (folder / "2026-07-20 — Документы за границу.md").read_text(encoding="utf-8")
+    assert (folder / "2026-07-20 — Документы за границу.md").exists()
+    # Source file untouched since audio wasn't renamed
+    assert 'Source file: "Dec 6, 23.57.m4a"' in md
+
+
+def test_update_manifest_syncs_out_path_and_source_name(tmp_path):
+    from transcriber.manifest import Manifest
+    from transcriber.models import ManifestEntry
+
+    mpath = tmp_path / "manifest.json"
+    m = Manifest(mpath)
+    m.upsert(ManifestEntry(
+        content_hash="blake2b:x",
+        source_name="Dec 6, 23.57.m4a",
+        status="done",
+        out_path="out/2026-07-20 — Dec 6.md",
+    ))
+    result = {
+        "old_md": "2026-07-20 — Dec 6.md",
+        "new_md": "2026-07-20 — Документы за границу.md",
+        "new_audio": "2026-07-20 — Документы за границу.m4a",
+    }
+    assert rename.update_manifest(m, result, log=lambda *a: None) is True
+
+    reloaded = Manifest(mpath).get("blake2b:x")
+    assert reloaded.out_path == "out/2026-07-20 — Документы за границу.md"
+    assert reloaded.source_name == "2026-07-20 — Документы за границу.m4a"
