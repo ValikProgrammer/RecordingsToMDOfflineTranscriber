@@ -86,6 +86,53 @@ def test_cmd_run_full_mode_fails_gracefully_when_a_dependency_is_unavailable(tmp
     assert entries[0].error
 
 
+def _write_raw(cfg, content_hash, summary):
+    from transcriber.models import AsrInfo, RawDoc, Segment
+    from transcriber.pipeline import atomic_write_json, hash_hex
+
+    doc = RawDoc(
+        schema=1, content_hash=content_hash, source_name=f"{content_hash}.m4a", source_path="x",
+        language="ru", duration_sec=1.0, num_speakers=1, is_monologue=True,
+        asr=AsrInfo("mlx", "large-v3", False), created_at="2026-01-01T00:00:00Z",
+        segments=[Segment(0.0, 1.0, None, "hi")], summary=summary,
+    )
+    atomic_write_json(Path(cfg.systems_folder) / "raw" / f"{hash_hex(content_hash)}.json", doc.to_dict())
+
+
+def test_cmd_run_summary_skips_already_summarized_unless_forced(tmp_path, monkeypatch):
+    from transcriber.models import ManifestEntry, StageState, Summary, default_stages
+    from transcriber.pipeline import utcnow_iso
+
+    cfg = _cfg(tmp_path)
+    _write_raw(cfg, "blake2b:pending", None)
+    _write_raw(cfg, "blake2b:done", Summary(title="T", text="already summarized"))
+
+    manifest = Manifest(Path(cfg.systems_folder) / "manifest.json")
+    for ch, summary_status in (("blake2b:pending", "pending"), ("blake2b:done", "done")):
+        stages = default_stages()
+        stages["text"] = StageState(status="done", updated_at=utcnow_iso())
+        stages["summary"] = StageState(status=summary_status, updated_at=utcnow_iso())
+        manifest.upsert(ManifestEntry(
+            content_hash=ch, source_name=f"{ch}.m4a", status="done",
+            stages=stages, updated_at=utcnow_iso(),
+        ))
+
+    captured = {}
+    monkeypatch.setattr(
+        "transcriber.__main__.Pipeline.run_existing",
+        lambda self, raw_paths, opts, jobs: captured.__setitem__("paths", list(raw_paths)),
+    )
+    log = setup_run_logger(Path(cfg.logs_folder))
+
+    cmd_run(cfg, parse_args(["--summary"]), log)
+    assert len(captured["paths"]) == 1  # only summary-pending per manifest
+
+    captured.clear()
+
+    cmd_run(cfg, parse_args(["--summary", "--force"]), log)
+    assert len(captured["paths"]) == 2
+
+
 def test_cmd_warmup_reports_a_clear_error_when_a_dependency_is_unavailable(tmp_path, capsys, monkeypatch):
     monkeypatch.delenv("HF_TOKEN", raising=False)
     cfg = _cfg(tmp_path)

@@ -23,6 +23,7 @@ Rules:
 - Start each block with a "[MM:SS]" timecode heading on its own line, using the EARLIEST timecode of that topic taken from the input. Timecodes are mandatory — every block must have one. When you merge adjacent sentences that belong to the same topic, keep the earliest of their timecodes.
 - Prefix a turn with the speaker label/name (exactly as given in the input) only when several speakers appear in a block or it reads as a dialogue; for a single-speaker stretch, no prefix is needed.
 - Fix obvious mishearings, add punctuation, and remove only filler words and pure repetition ("ну", "типа", "вот", "короче", restarts) — do NOT remove content.
+- This is an automatic transcription: nonsense, or the same word/phrase repeated many times in one place, is usually recognition noise rather than real speech — drop it. Reason logically about the context: if a common word does not fit, it was probably misheard, so replace it with what was most likely actually said. Apply this ONLY to ordinary, everyday words. Leave domain-specific or unusual terms as-is even if they look wrong — you cannot reliably guess them, so keep them for the user to fix.
 - NEVER invent facts, names, numbers, or events that are not in the transcript.
 - Output GitHub-flavored Markdown only — no preamble, no commentary."""
 

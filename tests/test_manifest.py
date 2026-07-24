@@ -76,3 +76,40 @@ def test_concurrent_upserts_are_thread_safe(tmp_path):
     assert len(manifest.all_entries()) == 20
     reloaded = Manifest(tmp_path / "manifest.json")
     assert len(reloaded.all_entries()) == 20
+
+
+def test_migrate_legacy_done_sets_only_text_done(tmp_path):
+    path = tmp_path / "manifest.json"
+    path.write_text(
+        '{"schema": 1, "entries": {"blake2b:aaa": {'
+        '"content_hash": "blake2b:aaa", "source_name": "a.m4a", "status": "done",'
+        '"updated_at": "2026-01-01T00:00:00Z"}}}'
+    )
+    from transcriber.manifest import Manifest
+    m = Manifest(path)
+    e = m.get("blake2b:aaa")
+    assert e.stages["text"].status == "done"
+    assert e.stages["diarize"].status == "pending"
+    assert e.stages["summary"].status == "pending"
+    assert e.stages["pretty"].status == "pending"
+
+
+def test_migrate_does_not_infer_summary_from_elsewhere(tmp_path):
+    # even if we later have raw with summary, migration alone must leave summary pending
+    path = tmp_path / "manifest.json"
+    path.write_text(
+        '{"schema": 1, "entries": {"blake2b:aaa": {'
+        '"content_hash": "blake2b:aaa", "source_name": "a.m4a", "status": "done"}}}'
+    )
+    from transcriber.manifest import Manifest
+    e = Manifest(path).get("blake2b:aaa")
+    assert e.stages["summary"].status == "pending"
+
+
+def test_new_entry_has_all_stages_pending(tmp_path):
+    from transcriber.manifest import Manifest
+    from transcriber.models import ManifestEntry, default_stages
+    m = Manifest(tmp_path / "manifest.json")
+    m.upsert(ManifestEntry(content_hash="blake2b:x", source_name="x.m4a", status="in_progress", stages=default_stages()))
+    e = Manifest(tmp_path / "manifest.json").get("blake2b:x")
+    assert all(e.stages[s].status == "pending" for s in ("text", "diarize", "summary", "pretty"))

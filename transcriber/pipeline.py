@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,10 +25,12 @@ from . import naming
 from .config import Config
 from .logging_setup import per_file_log_path, setup_file_logger
 from .manifest import Manifest
-from .models import FileTask, ManifestEntry, RawDoc
+from .models import FileTask, ManifestEntry, RawDoc, StageState, default_stages, stage_status
 from .progress import NullReporter
 from .stages import asr_mlx, audio as audio_stage, diarize as diarize_stage
+from .stages import langdetect as langdetect_stage
 from .stages import merge as merge_stage
+from .stages import mono_precheck
 from .stages import pretty as pretty_stage
 from .stages import render as render_stage
 from .stages import summarize as summarize_stage
@@ -38,7 +40,7 @@ _SENTINEL = object()
 
 @dataclass
 class RunOptions:
-    mode: str  # "full" | "text" | "summary" | "resummarize" | "rerender"
+    mode: str  # "full" | "text" | "diarize" | "summary" | "resummarize" | "rerender"
     only: str | None = None
     skip: list[str] | None = None
     turbo: bool = False
@@ -49,6 +51,8 @@ class RunOptions:
     frontmatter: bool = True
     wikilink_speakers: bool = False
     pretty: bool = False
+    force: bool = False  # --summary --force: re-summarize raw docs that already have a summary
+    want_diarize: bool = False  # diarization requested: --diarize (post-pass) or full (inline)
 
 
 def utcnow_iso() -> str:
@@ -61,6 +65,15 @@ def hash_hex(content_hash: str) -> str:
 
 def hash8(content_hash: str) -> str:
     return hash_hex(content_hash)[:8]
+
+
+def _with_stage(stages: dict[str, StageState], name: str, status: str, reason: str | None = None) -> dict[str, StageState]:
+    """Return a copy of `stages` with `name` set to `status` — never mutates the
+    input dict, so callers can safely reuse a prior manifest entry's stages when
+    building the next one (upsert must merge, not wipe stages to defaults)."""
+    updated = dict(stages)
+    updated[name] = StageState(status=status, updated_at=utcnow_iso(), reason=reason)
+    return updated
 
 
 def filter_tasks(tasks: list[FileTask], only: str | None, skip: list[str] | None) -> list[FileTask]:
@@ -137,6 +150,66 @@ def list_raw_files(systems_folder: Path) -> list[Path]:
     return sorted((Path(systems_folder) / "raw").glob("*.json"))
 
 
+def resolve_raw_by_query(systems_folder: Path, query: str) -> list[Path]:
+    """Resolve a `--enroll-raw` argument to raw JSON paths.
+
+    A direct path to an existing file wins. Otherwise treat `query` as a
+    case-insensitive substring and match raw docs by filename stem (the content
+    hash) or by their `source_name`."""
+    direct = Path(query)
+    if direct.is_file():
+        return [direct]
+    needle = query.lower()
+    matches: list[Path] = []
+    for p in list_raw_files(systems_folder):
+        if needle in p.stem.lower():
+            matches.append(p)
+            continue
+        try:
+            if needle in load_raw_doc(p).source_name.lower():
+                matches.append(p)
+        except (OSError, ValueError, KeyError):  # skip unreadable/corrupt raw
+            continue
+    return matches
+
+
+def filter_need_stage(
+    manifest: Manifest,
+    raw_paths: list[Path],
+    stage: str,
+    *,
+    force: bool = False,
+) -> list[Path]:
+    """Keep raw paths whose manifest `stage` is pending/failed (or all if force).
+
+    Manifest is the source of truth. If a raw has no manifest entry, create one
+    with text=done and other stages pending so orphan raws remain processable.
+    """
+    kept: list[Path] = []
+    for path in raw_paths:
+        try:
+            doc = load_raw_doc(path)
+        except (OSError, ValueError, KeyError):
+            continue
+        entry = manifest.get(doc.content_hash)
+        if entry is None:
+            stages = default_stages()
+            stages["text"] = StageState(status="done", updated_at=utcnow_iso())
+            entry = ManifestEntry(
+                content_hash=doc.content_hash,
+                source_name=doc.source_name,
+                status="done",
+                raw_path=str(path),
+                stages=stages,
+                updated_at=utcnow_iso(),
+            )
+            manifest.upsert(entry)
+        status = stage_status(entry, stage)
+        if force or status in ("pending", "failed"):
+            kept.append(path)
+    return kept
+
+
 @dataclass
 class _Ctx:
     task: FileTask
@@ -147,7 +220,10 @@ class _Ctx:
     total: int = 0
     wav_path: Path | None = None
     duration: float = 0.0
+    language: str | None = None  # resolved in stage A: forced code, or detected, or None (auto)
     doc: RawDoc | None = None
+    diarized: bool = False  # set in stage B: did this run take the ASR-parallel-diarize path?
+    diarize_skip_reason: str | None = None  # e.g. "mono" when pre-check skipped full pyannote
 
 
 class Pipeline:
@@ -158,6 +234,7 @@ class Pipeline:
         *,
         normalize=audio_stage.normalize,
         transcribe=asr_mlx.transcribe,
+        detect_language=langdetect_stage.detect_language,
         diarize=diarize_stage.diarize,
         merge=merge_stage.merge,
         summarize=summarize_stage.summarize,
@@ -170,6 +247,7 @@ class Pipeline:
         self.manifest = manifest
         self.normalize = normalize
         self.transcribe = transcribe
+        self.detect_language = detect_language
         self.diarize = diarize
         self.merge = merge
         self.summarize = summarize
@@ -177,17 +255,30 @@ class Pipeline:
         self.pretty_transcript = pretty_transcript
         self.reporter = reporter if reporter is not None else NullReporter()
         self.console_logs = console_logs
+        self._drain = threading.Event()  # set by request_drain(): finish in-flight, take no new files
+
+    def request_drain(self) -> bool:
+        """Ask run_all to stop taking NEW files while finishing in-flight ones.
+
+        Returns True on the first request, False if a drain is already in progress
+        (so a signal handler can force-quit on the second Ctrl-C)."""
+        if self._drain.is_set():
+            return False
+        self._drain.set()
+        return True
 
     # --- shared helpers -------------------------------------------------
 
     def _mark_in_progress(self, content_hash: str, source_name: str, log_path: Path) -> None:
-        """Transition to in_progress while preserving out_path from any prior run,
-        so a later rerender/resummarize overwrites the same file instead of colliding."""
+        """Transition to in_progress while preserving out_path and per-stage status
+        from any prior run, so a later rerender/resummarize overwrites the same file
+        instead of colliding, and stages already `done` aren't wiped back to pending."""
         existing = self.manifest.get(content_hash)
         self.manifest.upsert(
             ManifestEntry(
                 content_hash=content_hash, source_name=source_name, status="in_progress",
                 out_path=existing.out_path if existing else None,
+                stages=dict(existing.stages) if existing else default_stages(),
                 log_path=str(log_path), updated_at=utcnow_iso(),
             )
         )
@@ -195,11 +286,13 @@ class Pipeline:
     def _fail(self, task: FileTask, log_path: Path, log: logging.Logger, exc: Exception) -> None:
         log.info(f"FAILED: {exc}\n{traceback.format_exc()}")
         self.reporter.file_failed(task.content_hash, exc)
+        existing = self.manifest.get(task.content_hash)
         self.manifest.upsert(
             ManifestEntry(
                 content_hash=task.content_hash,
                 source_name=task.source_name,
                 status="failed",
+                stages=dict(existing.stages) if existing else default_stages(),
                 log_path=str(log_path),
                 error=str(exc),
                 updated_at=utcnow_iso(),
@@ -213,7 +306,13 @@ class Pipeline:
         filename = naming.build_output_filename(day, title)
         return naming.resolve_collision(Path(self.cfg.out_folder), filename)
 
-    def _write_outputs(self, doc: RawDoc, task: FileTask, opts: RunOptions, log: logging.Logger) -> tuple[Path, Path]:
+    def _write_outputs(
+        self, doc: RawDoc, task: FileTask, opts: RunOptions, log: logging.Logger
+    ) -> tuple[Path, Path, bool]:
+        """Returns (out_path, raw_path, pretty_written). `pretty_written` is False
+        when `--pretty` wasn't requested, or was skipped because the file already
+        exists (incremental) — callers use it to decide whether `pretty` stage
+        becomes `done` this run."""
         title, day = resolve_title_and_date(task.source_name, task.path, doc)
 
         raw_path = Path(self.cfg.systems_folder) / "raw" / f"{hash_hex(task.content_hash)}.json"
@@ -229,20 +328,27 @@ class Pipeline:
         atomic_write_text(out_path, md)
         log.info(f"rendered: {out_path}")
 
+        pretty_written = False
         if opts.pretty:
-            pretty_body = self.pretty_transcript(doc, self.cfg, log)
-            pretty_md = self.render_markdown(
-                doc, day.isoformat(), title,
-                frontmatter=opts.frontmatter,
-                wikilink_speakers=opts.wikilink_speakers,
-                long_form_from_min=self.cfg.long_form_from_min,
-                transcript_override=pretty_body,
-            )
             pretty_path = Path(self.cfg.out_folder) / "pretty" / out_path.name
-            atomic_write_text(pretty_path, pretty_md)
-            log.info(f"pretty: {pretty_path}")
+            existing = self.manifest.get(task.content_hash)
+            pretty_done = existing is not None and stage_status(existing, "pretty") == "done"
+            if pretty_done and not opts.force:
+                log.info(f"pretty stage done, skipping (use --force to redo): {pretty_path}")
+            else:
+                pretty_body = self.pretty_transcript(doc, self.cfg, log)
+                pretty_md = self.render_markdown(
+                    doc, day.isoformat(), title,
+                    frontmatter=opts.frontmatter,
+                    wikilink_speakers=opts.wikilink_speakers,
+                    long_form_from_min=self.cfg.long_form_from_min,
+                    transcript_override=pretty_body,
+                )
+                atomic_write_text(pretty_path, pretty_md)
+                log.info(f"pretty: {pretty_path}")
+                pretty_written = True
 
-        return out_path, raw_path
+        return out_path, raw_path, pretty_written
 
     # --- fresh audio (--text / full) staged pipeline --------------------
 
@@ -260,6 +366,13 @@ class Pipeline:
             log.info(f"ffmpeg -> 16k mono wav, duration={duration:.1f}s")
             ctx.wav_path = wav_path
             ctx.duration = duration
+            # Resolve the decode language here in stage A (CPU): when auto, detection
+            # runs on this file while the GPU (stage B) transcribes an earlier one.
+            lang = self.cfg.asr_language.strip()
+            if lang.lower() in ("", "auto"):
+                ctx.language = self.detect_language(wav_path, log, min_prob=self.cfg.lang_detect_min_prob)
+            else:
+                ctx.language = lang
             return ctx
         except Exception as exc:  # noqa: BLE001 - graceful per-file failure (§15)
             self._fail(task, log_path, log, exc)
@@ -270,16 +383,13 @@ class Pipeline:
         from . import voiceprints
 
         store = voiceprints.VoiceprintStore(Path(self.cfg.systems_folder) / "voiceprints")
-        for sm in doc.speakers_meta:
-            if sm.name and sm.embedding:  # confirmed name from --names — treat as ground truth
-                store.enroll(sm.name, sm.embedding)
+        voiceprints.enroll_named_speakers(doc, store)  # confirmed --names → ground truth
         voiceprints.identify_speakers(doc, store, self.cfg.voiceprint_threshold)
 
     def _safe_stage_b(self, ctx: _Ctx, opts: RunOptions) -> _Ctx | None:
         task, log = ctx.task, ctx.log
         try:
-            lang = self.cfg.asr_language.strip()
-            language = None if lang.lower() in ("", "auto") else lang
+            language = ctx.language  # resolved in stage A (forced code, detected, or None=auto)
             prompt = asr_mlx.build_initial_prompt(self.cfg.asr_prompt_extra)
 
             def _run_asr():
@@ -290,34 +400,52 @@ class Pipeline:
                 )
                 return result
 
-            if opts.mode == "text":
+            if opts.mode == "text" and not opts.want_diarize:
                 asr = _run_asr()
                 doc = merge_stage.build_text_doc(
                     asr, content_hash=task.content_hash, source_name=task.source_name,
                     source_path=str(task.path), duration_sec=ctx.duration,
                 )
             else:
-                self.reporter.stage(task.content_hash, "DIARIZE", "diarizing")
-                # Best-effort overlap: run diarization on a worker thread while ASR
-                # runs here. Both read the same wav and are independent; merge waits
-                # for both. Quality is unaffected (same models, same params).
-                with ThreadPoolExecutor(max_workers=1) as diar_pool:
-                    diar_future = diar_pool.submit(
-                        self.diarize, ctx.wav_path, self.cfg.diarize_device,
-                        opts.speakers, opts.min_speakers, opts.max_speakers, log,
-                    )
-                    asr = _run_asr()
-                    diar = diar_future.result()
-                self.reporter.stage(task.content_hash, "MERGE", "merging speakers")
-                doc = self.merge(
-                    asr, diar, self.cfg.mono_threshold, opts.names, log,
-                    content_hash=task.content_hash, source_name=task.source_name,
-                    source_path=str(task.path), duration_sec=ctx.duration,
-                    min_speaker_share=self.cfg.min_speaker_share,
+                # ASR ∥ diarize for full / text+--diarize. Sample mono pre-check first;
+                # on clear monologue skip full-file pyannote (reason=mono).
+                self.reporter.stage(task.content_hash, "DIARIZE", "precheck")
+                mono = mono_precheck.is_likely_monologue(
+                    ctx.wav_path, ctx.duration, self.diarize, self.cfg.diarize_device, log,
                 )
-                if self.cfg.voiceprint_enabled:
-                    self.reporter.stage(task.content_hash, "VOICEID", "matching voices")
-                    self._apply_voiceprints(doc, log)
+                if mono is True:
+                    log.info("mono-precheck: monologue — skipping full diarize")
+                    asr = _run_asr()
+                    doc = merge_stage.build_text_doc(
+                        asr, content_hash=task.content_hash, source_name=task.source_name,
+                        source_path=str(task.path), duration_sec=ctx.duration,
+                    )
+                    ctx.diarize_skip_reason = "mono"
+                else:
+                    if mono is None:
+                        log.info("mono-precheck: inconclusive — running full diarize")
+                    ctx.diarized = True
+                    self.reporter.stage(task.content_hash, "DIARIZE", "diarizing")
+                    # Best-effort overlap: run diarization on a worker thread while ASR
+                    # runs here. Both read the same wav and are independent; merge waits
+                    # for both. Quality is unaffected (same models, same params).
+                    with ThreadPoolExecutor(max_workers=1) as diar_pool:
+                        diar_future = diar_pool.submit(
+                            self.diarize, ctx.wav_path, self.cfg.diarize_device,
+                            opts.speakers, opts.min_speakers, opts.max_speakers, log,
+                        )
+                        asr = _run_asr()
+                        diar = diar_future.result()
+                    self.reporter.stage(task.content_hash, "MERGE", "merging speakers")
+                    doc = self.merge(
+                        asr, diar, self.cfg.mono_threshold, opts.names, log,
+                        content_hash=task.content_hash, source_name=task.source_name,
+                        source_path=str(task.path), duration_sec=ctx.duration,
+                        min_speaker_share=self.cfg.min_speaker_share,
+                    )
+                    if self.cfg.voiceprint_enabled:
+                        self.reporter.stage(task.content_hash, "VOICEID", "matching voices")
+                        self._apply_voiceprints(doc, log)
             ctx.doc = doc
             log.info(f"ASR done: language={doc.language}, segments={len(doc.segments)}")
             return ctx
@@ -328,18 +456,34 @@ class Pipeline:
     def _safe_stage_c(self, ctx: _Ctx, opts: RunOptions) -> None:
         task, log = ctx.task, ctx.log
         try:
+            summarized = False
             if opts.mode == "full":
                 self.reporter.stage(task.content_hash, "SUMMARY", "summarizing")
                 ctx.doc.summary = self.summarize(ctx.doc, self.cfg, log)
+                summarized = True
             self.reporter.stage(task.content_hash, "RENDER", "rendering")
-            out_path, raw_path = self._write_outputs(ctx.doc, task, opts, log)
+            out_path, raw_path, pretty_written = self._write_outputs(ctx.doc, task, opts, log)
             elapsed = time.monotonic() - ctx.started
+
+            existing = self.manifest.get(task.content_hash)
+            stages = dict(existing.stages) if existing else default_stages()
+            stages = _with_stage(stages, "text", "done")
+            if ctx.diarized:
+                stages = _with_stage(stages, "diarize", "done")
+            elif ctx.diarize_skip_reason:
+                stages = _with_stage(stages, "diarize", "skipped", reason=ctx.diarize_skip_reason)
+            if summarized:
+                stages = _with_stage(stages, "summary", "done")
+            if pretty_written:
+                stages = _with_stage(stages, "pretty", "done")
+
             self.manifest.upsert(
                 ManifestEntry(
                     content_hash=task.content_hash, source_name=task.source_name, status="done",
                     language=ctx.doc.language, num_speakers=ctx.doc.num_speakers,
                     duration_sec=ctx.doc.duration_sec, out_path=str(out_path), raw_path=str(raw_path),
                     log_path=str(ctx.log_path), elapsed_sec=elapsed, error=None, updated_at=utcnow_iso(),
+                    stages=stages,
                 )
             )
             log.info(f"done (elapsed={elapsed:.1f}s)")
@@ -358,15 +502,34 @@ class Pipeline:
         total = len(tasks)
 
         def worker_a() -> None:
+            # Bound how far stage A (ffmpeg + lang-detect, CPU) may run ahead of the
+            # GPU stage: submit at most `stage_a_lookahead` files at a time instead of
+            # all at once. Otherwise the pool churns through the whole batch eagerly,
+            # piling up normalized files + model work and driving the machine into
+            # memory pressure / OOM (issue: night-run jetsam kills).
+            lookahead = max(1, self.cfg.stage_a_lookahead)
+            task_iter = iter(enumerate(tasks, start=1))
             with ThreadPoolExecutor(max_workers=jobs) as pool:
-                submitted = [
-                    pool.submit(self._safe_stage_a, t, i, total, tmp_root)
-                    for i, t in enumerate(tasks, start=1)
-                ]
-                for fut in submitted:
-                    ctx = fut.result()
-                    if ctx is not None:
-                        stage_a_out.put(ctx)
+                pending: set = set()
+                exhausted = False
+                while pending or not exhausted:
+                    while len(pending) < lookahead and not exhausted:
+                        if self._drain.is_set():  # graceful stop: no new files, let in-flight finish
+                            exhausted = True
+                            break
+                        nxt = next(task_iter, None)
+                        if nxt is None:
+                            exhausted = True
+                            break
+                        i, t = nxt
+                        pending.add(pool.submit(self._safe_stage_a, t, i, total, tmp_root))
+                    if not pending:
+                        break
+                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    for fut in done:
+                        ctx = fut.result()
+                        if ctx is not None:
+                            stage_a_out.put(ctx)
             stage_a_out.put(_SENTINEL)
 
         def worker_b() -> None:
@@ -397,6 +560,125 @@ class Pipeline:
 
         shutil.rmtree(tmp_root, ignore_errors=True)
 
+    # --- post-pass diarize on existing text raws (--diarize) -------------
+
+    def process_diarize_one(
+        self, task: FileTask, opts: RunOptions, idx: int, total: int, tmp_root: Path
+    ) -> None:
+        """Add speakers to an existing text raw without re-running ASR."""
+        h8 = hash8(task.content_hash)
+        log_path = per_file_log_path(Path(self.cfg.logs_folder), task.source_name, h8)
+        log = setup_file_logger(log_path, console=self.console_logs)
+        log.info(f"taken: {task.source_name} (hash {h8}) mode=diarize (post-pass)")
+        started = time.monotonic()
+        self._mark_in_progress(task.content_hash, task.source_name, log_path)
+        self.reporter.file_start(task.content_hash, idx, total, task.source_name, task.audio_sec)
+
+        existing = self.manifest.get(task.content_hash)
+        stages = dict(existing.stages) if existing else default_stages()
+        raw_path = Path(self.cfg.systems_folder) / "raw" / f"{hash_hex(task.content_hash)}.json"
+
+        def _finish_skip(reason: str, message: str) -> None:
+            nonlocal stages
+            stages = _with_stage(stages, "diarize", "skipped", reason=reason)
+            log.info(message)
+            self.manifest.upsert(
+                ManifestEntry(
+                    content_hash=task.content_hash,
+                    source_name=task.source_name,
+                    status="done",
+                    out_path=existing.out_path if existing else None,
+                    raw_path=str(raw_path) if raw_path.exists() else (existing.raw_path if existing else None),
+                    log_path=str(log_path),
+                    elapsed_sec=time.monotonic() - started,
+                    error=None,
+                    updated_at=utcnow_iso(),
+                    stages=stages,
+                    language=existing.language if existing else None,
+                    num_speakers=existing.num_speakers if existing else None,
+                    duration_sec=existing.duration_sec if existing else None,
+                )
+            )
+            self.reporter.file_done(task.content_hash, time.monotonic() - started, existing.out_path if existing else "")
+
+        try:
+            text_done = existing is not None and stage_status(existing, "text") == "done"
+            if not raw_path.exists() or not text_done:
+                _finish_skip("no_transcript", "skip diarize: no transcript (text stage not done or raw missing)")
+                return
+
+            doc = load_raw_doc(raw_path)
+            self.reporter.stage(task.content_hash, "FFMPEG", "normalizing")
+            wav_path, duration = self.normalize(task.path, tmp_root)
+            log.info(f"ffmpeg -> 16k mono wav, duration={duration:.1f}s")
+
+            self.reporter.stage(task.content_hash, "DIARIZE", "precheck")
+            mono = mono_precheck.is_likely_monologue(
+                wav_path, duration, self.diarize, self.cfg.diarize_device, log,
+            )
+            if mono is True:
+                _finish_skip("mono", "mono-precheck: monologue — skipping full diarize")
+                return
+            if mono is None:
+                log.info("mono-precheck: inconclusive — running full diarize")
+
+            self.reporter.stage(task.content_hash, "DIARIZE", "diarizing")
+            diar = self.diarize(
+                wav_path, self.cfg.diarize_device,
+                opts.speakers, opts.min_speakers, opts.max_speakers, log,
+            )
+            self.reporter.stage(task.content_hash, "MERGE", "merging speakers")
+            summary = doc.summary
+            created_at = doc.created_at
+            merged = self.merge(
+                merge_stage.asr_from_doc(doc), diar, self.cfg.mono_threshold, opts.names, log,
+                content_hash=doc.content_hash, source_name=doc.source_name,
+                source_path=doc.source_path, duration_sec=doc.duration_sec,
+                min_speaker_share=self.cfg.min_speaker_share,
+            )
+            merged.summary = summary
+            merged.created_at = created_at
+            if self.cfg.voiceprint_enabled:
+                self.reporter.stage(task.content_hash, "VOICEID", "matching voices")
+                self._apply_voiceprints(merged, log)
+
+            self.reporter.stage(task.content_hash, "RENDER", "rendering")
+            out_path, raw_path_out, pretty_written = self._write_outputs(merged, task, opts, log)
+            stages = _with_stage(stages, "diarize", "done")
+            if pretty_written:
+                stages = _with_stage(stages, "pretty", "done")
+            elapsed = time.monotonic() - started
+            self.manifest.upsert(
+                ManifestEntry(
+                    content_hash=task.content_hash, source_name=task.source_name, status="done",
+                    language=merged.language, num_speakers=merged.num_speakers,
+                    duration_sec=merged.duration_sec, out_path=str(out_path), raw_path=str(raw_path_out),
+                    log_path=str(log_path), elapsed_sec=elapsed, error=None, updated_at=utcnow_iso(),
+                    stages=stages,
+                )
+            )
+            log.info(f"done (elapsed={elapsed:.1f}s)")
+            self.reporter.file_done(task.content_hash, elapsed, out_path)
+        except Exception as exc:  # noqa: BLE001
+            self._fail(task, log_path, log, exc)
+
+    def run_diarize_pass(self, tasks: list[FileTask], opts: RunOptions, jobs: int) -> None:
+        """Post-pass: diarize existing text raws (no ASR)."""
+        if not tasks:
+            return
+        tmp_root = Path(tempfile.mkdtemp(prefix="transcriber-diarize-"))
+        total = len(tasks)
+        try:
+            with ThreadPoolExecutor(max_workers=jobs) as pool:
+                list(
+                    pool.map(
+                        lambda it: self.process_diarize_one(it[1], opts, it[0], total, tmp_root),
+                        list(enumerate(tasks, start=1)),
+                    )
+                )
+        finally:
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
     # --- existing raw JSON (--summary / --resummarize / --rerender) -----
 
     def process_existing_raw(self, raw_path: Path, opts: RunOptions, idx: int = 1, total: int = 1) -> None:
@@ -419,14 +701,21 @@ class Pipeline:
                 doc.summary = self.summarize(doc, self.cfg, log)
                 atomic_write_json(raw_path, doc.to_dict())
             self.reporter.stage(doc.content_hash, "RENDER", "rendering")
-            out_path, raw_path_out = self._write_outputs(doc, task, opts, log)
+            out_path, raw_path_out, pretty_written = self._write_outputs(doc, task, opts, log)
             elapsed = time.monotonic() - started
+            existing = self.manifest.get(doc.content_hash)
+            stages = dict(existing.stages) if existing else default_stages()
+            if opts.mode != "rerender":
+                stages = _with_stage(stages, "summary", "done")
+            if pretty_written:
+                stages = _with_stage(stages, "pretty", "done")
             self.manifest.upsert(
                 ManifestEntry(
                     content_hash=doc.content_hash, source_name=doc.source_name, status="done",
                     language=doc.language, num_speakers=doc.num_speakers, duration_sec=doc.duration_sec,
                     out_path=str(out_path), raw_path=str(raw_path_out), log_path=str(log_path),
                     elapsed_sec=elapsed, error=None, updated_at=utcnow_iso(),
+                    stages=stages,
                 )
             )
             log.info(f"done (elapsed={elapsed:.1f}s)")

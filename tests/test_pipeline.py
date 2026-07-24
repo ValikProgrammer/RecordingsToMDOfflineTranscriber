@@ -157,7 +157,21 @@ def _fake_asr():
 
 
 def _fake_diar():
-    return DiarResult(segments=[DiarSegment(0.0, 1.0, "SPEAKER_00")])
+    # Two speakers so sample mono-precheck does not skip full diarize in tests.
+    return DiarResult(
+        segments=[
+            DiarSegment(0.0, 0.5, "SPEAKER_00"),
+            DiarSegment(0.5, 1.0, "SPEAKER_01"),
+        ],
+        total_speech_sec={"SPEAKER_00": 0.5, "SPEAKER_01": 0.5},
+    )
+
+
+def _fake_diar_mono():
+    return DiarResult(
+        segments=[DiarSegment(0.0, 1.0, "SPEAKER_00")],
+        total_speech_sec={"SPEAKER_00": 1.0},
+    )
 
 
 def _make_pipeline(tmp_path, **stage_overrides):
@@ -205,8 +219,88 @@ def test_run_all_text_mode_never_calls_diarize_or_summarize(tmp_path):
 
     entry = manifest.get(task.content_hash)
     assert entry.status == "done"
+    assert entry.stages["text"].status == "done"
+    assert entry.stages["diarize"].status == "pending"
+    assert entry.stages["summary"].status == "pending"
     md = Path(entry.out_path).read_text(encoding="utf-8")
     assert "### Summary" not in md
+
+
+def test_run_all_text_plus_want_diarize_marks_both_stages(tmp_path):
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, summarize=lambda *a, **k: (_ for _ in ()).throw(AssertionError("no summary")))
+    task = _task(path=tmp_path / "team call.m4a")
+    task.path.write_bytes(b"fake audio")
+
+    pipeline.run_all([task], RunOptions(mode="text", want_diarize=True), jobs=1)
+
+    entry = manifest.get(task.content_hash)
+    assert entry.stages["text"].status == "done"
+    assert entry.stages["diarize"].status == "done"
+    assert entry.stages["summary"].status == "pending"
+
+
+def test_run_all_full_mode_marks_text_diarize_summary_done(tmp_path):
+    cfg, manifest, pipeline = _make_pipeline(tmp_path)
+    task = _task(path=tmp_path / "team call.m4a")
+    task.path.write_bytes(b"fake audio")
+
+    pipeline.run_all([task], RunOptions(mode="full", want_diarize=True), jobs=1)
+
+    entry = manifest.get(task.content_hash)
+    assert entry.stages["text"].status == "done"
+    assert entry.stages["diarize"].status == "done"
+    assert entry.stages["summary"].status == "done"
+
+
+def test_run_all_diarize_mode_diarizes_but_skips_summary(tmp_path):
+    def boom_summarize(*a, **k):
+        raise AssertionError("summarize must not run in --diarize mode")
+
+    calls = {"diarize": 0}
+
+    def counting_diar(wav, device, s, mn, mx, log):
+        calls["diarize"] += 1
+        return _fake_diar()
+
+    cfg, manifest, pipeline = _make_pipeline(
+        tmp_path, diarize=counting_diar, summarize=boom_summarize
+    )
+    task = _task(path=tmp_path / "team call.m4a")
+    task.path.write_bytes(b"fake audio")
+
+    # Joint path still used by run_all when mode=diarize (legacy); CLI uses post-pass.
+    pipeline.run_all([task], RunOptions(mode="diarize", want_diarize=True), jobs=1)
+
+    entry = manifest.get(task.content_hash)
+    assert entry.status == "done"
+    assert calls["diarize"] >= 1  # precheck window(s) + possibly full
+    assert Path(entry.raw_path).exists()
+    md = Path(entry.out_path).read_text(encoding="utf-8")
+    assert "### Summary" not in md
+
+
+def test_run_all_mono_precheck_skips_full_diarize(tmp_path, monkeypatch):
+    calls = {"diarize": 0}
+
+    def counting_mono(wav, device, s, mn, mx, log):
+        calls["diarize"] += 1
+        return _fake_diar_mono()
+
+    monkeypatch.setattr(
+        "transcriber.pipeline.mono_precheck.is_likely_monologue",
+        lambda *a, **k: True,
+    )
+
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, diarize=counting_mono)
+    task = _task(path=tmp_path / "memo.m4a")
+    task.path.write_bytes(b"fake audio")
+
+    pipeline.run_all([task], RunOptions(mode="full", want_diarize=True), jobs=1)
+
+    entry = manifest.get(task.content_hash)
+    assert entry.stages["diarize"].status == "skipped"
+    assert entry.stages["diarize"].reason == "mono"
+    assert calls["diarize"] == 0  # precheck short-circuited; full diarize never called
 
 
 def test_run_all_stage_a_failure_marks_failed_and_does_not_crash_others(tmp_path):
@@ -275,6 +369,36 @@ def _write_raw_doc(tmp_path, cfg_systems_folder, content_hash="blake2b:raw1", so
     return raw_path, doc
 
 
+def test_filter_need_stage_uses_manifest_not_raw_summary(tmp_path):
+    from transcriber.models import ManifestEntry, StageState, Summary, default_stages
+    from transcriber.pipeline import atomic_write_json, filter_need_stage, hash_hex, utcnow_iso
+
+    cfg, manifest, _ = _make_pipeline(tmp_path)
+    pending_path, _ = _write_raw_doc(tmp_path, cfg.systems_folder, content_hash="blake2b:pending")
+    done_path, doc = _write_raw_doc(tmp_path, cfg.systems_folder, content_hash="blake2b:done")
+    doc.summary = Summary(title="T", text="already summarized")
+    atomic_write_json(done_path, doc.to_dict())
+
+    # Manifest says summary done for blake2b:done even if we only care about stages
+    for path, ch, summary_status in (
+        (pending_path, "blake2b:pending", "pending"),
+        (done_path, "blake2b:done", "done"),
+    ):
+        stages = default_stages()
+        stages["text"] = StageState(status="done", updated_at=utcnow_iso())
+        stages["summary"] = StageState(status=summary_status, updated_at=utcnow_iso())
+        manifest.upsert(ManifestEntry(
+            content_hash=ch, source_name=f"{ch}.m4a", status="done",
+            raw_path=str(path), stages=stages, updated_at=utcnow_iso(),
+        ))
+
+    result = filter_need_stage(manifest, [pending_path, done_path], "summary", force=False)
+    assert result == [pending_path]
+
+    forced = filter_need_stage(manifest, [pending_path, done_path], "summary", force=True)
+    assert set(forced) == {pending_path, done_path}
+
+
 def test_process_existing_raw_resummarize_calls_summarize_not_asr(tmp_path):
     def boom(*a, **k):
         raise AssertionError("ASR must not run for --resummarize")
@@ -338,14 +462,19 @@ def test_stage_b_passes_language_and_prompt_from_config(tmp_path):
     assert "ФизТех" in captured["initial_prompt"]
 
 
-def test_stage_b_auto_language_passes_none(tmp_path):
+def test_stage_b_auto_language_uses_none_when_detector_undecided(tmp_path):
     captured = {}
 
     def spy_transcribe(wav, turbo, log, language=None, initial_prompt=None):
         captured["language"] = language
         return _fake_asr()
 
-    cfg, manifest, pipeline = _make_pipeline(tmp_path, transcribe=spy_transcribe)
+    def undecided_detect(wav, log, **kw):
+        return None  # bilingual/uncertain -> don't force, let the backend switch
+
+    cfg, manifest, pipeline = _make_pipeline(
+        tmp_path, transcribe=spy_transcribe, detect_language=undecided_detect
+    )
     cfg.asr_language = "auto"
     task = _task(path=tmp_path / "team call.m4a")
     task.path.write_bytes(b"x")
@@ -449,6 +578,29 @@ def test_stage_b_enrolls_named_speakers(tmp_path):
     assert store.identify([0.0, 1.0, 0.0], threshold=0.7) == "Иван"
 
 
+def test_pretty_skips_when_output_exists_unless_forced(tmp_path):
+    calls = {"n": 0}
+
+    def spy_pretty(doc, cfg, log):
+        calls["n"] += 1
+        return "PRETTY BODY"
+
+    cfg, _, pipeline = _make_pipeline(tmp_path, pretty_transcript=spy_pretty)
+    raw_path, _ = _write_raw_doc(tmp_path, cfg.systems_folder)
+
+    # first pass: pretty file doesn't exist yet -> generated
+    pipeline.process_existing_raw(raw_path, RunOptions(mode="rerender", pretty=True))
+    assert calls["n"] == 1
+
+    # second pass: pretty file exists -> skipped, not regenerated
+    pipeline.process_existing_raw(raw_path, RunOptions(mode="rerender", pretty=True))
+    assert calls["n"] == 1
+
+    # with --force: regenerated even though the file exists
+    pipeline.process_existing_raw(raw_path, RunOptions(mode="rerender", pretty=True, force=True))
+    assert calls["n"] == 2
+
+
 def test_pretty_flag_writes_pretty_file(tmp_path):
     cfg, manifest, pipeline = _make_pipeline(tmp_path, pretty_transcript=lambda doc, cfg, log: "PRETTY BODY")
     task = _task(path=tmp_path / "team call.m4a")
@@ -469,6 +621,116 @@ def test_pretty_flag_writes_pretty_file(tmp_path):
     assert "**[00:00]" not in pretty
 
 
+def test_request_drain_first_true_then_false(tmp_path):
+    _, _, pipeline = _make_pipeline(tmp_path)
+    assert pipeline.request_drain() is True   # first signal: start draining
+    assert pipeline.request_drain() is False  # second signal: caller should force-quit
+
+
+def test_drain_stops_taking_new_files(tmp_path):
+    # After drain is requested, stage A must not pull any new files (run still exits cleanly).
+    processed = []
+
+    def spy_transcribe(wav, turbo, log, **kw):
+        processed.append(str(wav))
+        return _fake_asr()
+
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, transcribe=spy_transcribe)
+    pipeline.request_drain()  # drain before the run even starts
+    tasks = []
+    for i in range(4):
+        t = _task(name=f"f{i}.m4a", content_hash=f"blake2b:{i}", path=tmp_path / f"f{i}.m4a")
+        t.path.write_bytes(b"x")
+        tasks.append(t)
+
+    pipeline.run_all(tasks, RunOptions(mode="text"), jobs=2)  # returns cleanly, takes nothing new
+
+    assert processed == []
+    assert all(manifest.get(t.content_hash) is None for t in tasks)
+
+
+def test_stage_a_does_not_run_far_ahead_of_gpu(tmp_path):
+    # Regression: stage A must not eagerly churn the whole batch (memory blowup).
+    # With stage B blocked, stage A should stall after ~lookahead files, not all of them.
+    import time
+
+    release = threading.Event()
+    starts = []
+    lock = threading.Lock()
+
+    def counting_normalize(path, tmp_dir):
+        with lock:
+            starts.append(path.name)
+        return _fake_normalize(path, tmp_dir)
+
+    def blocking_transcribe(wav, turbo, log, **kw):
+        release.wait(timeout=10)  # stall the GPU stage
+        return _fake_asr()
+
+    cfg, manifest, pipeline = _make_pipeline(
+        tmp_path, normalize=counting_normalize, transcribe=blocking_transcribe
+    )
+    cfg.stage_a_lookahead = 3
+    tasks = []
+    for i in range(12):
+        t = _task(name=f"f{i}.m4a", content_hash=f"blake2b:{i}", path=tmp_path / f"f{i}.m4a")
+        t.path.write_bytes(b"x")
+        tasks.append(t)
+
+    th = threading.Thread(target=pipeline.run_all, args=(tasks, RunOptions(mode="text"), 2))
+    th.start()
+    time.sleep(0.6)  # let stage A run as far ahead as it's allowed
+    with lock:
+        ahead = len(starts)
+    release.set()
+    th.join(timeout=15)
+
+    # lookahead(3) + stage_a_out queue(jobs=2) + in-flight slack — never the whole batch of 12
+    assert ahead <= 6, f"stage A ran {ahead} files ahead — backpressure not working"
+
+
+def test_auto_language_forces_detector_result(tmp_path):
+    captured = {}
+
+    def spy_transcribe(wav, turbo, log, **kw):
+        captured["language"] = kw.get("language")
+        return _fake_asr()
+
+    def fake_detect(wav, log, **kw):
+        captured["detect_called"] = True
+        return "en"
+
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, transcribe=spy_transcribe, detect_language=fake_detect)
+    cfg.asr_language = "auto"
+    task = _task(path=tmp_path / "call.m4a")
+    task.path.write_bytes(b"x")
+
+    pipeline.run_all([task], RunOptions(mode="text"), jobs=1)
+
+    assert captured["detect_called"] is True
+    assert captured["language"] == "en"  # detected language is forced on transcribe
+
+
+def test_forced_language_skips_detector(tmp_path):
+    captured = {}
+
+    def spy_transcribe(wav, turbo, log, **kw):
+        captured["language"] = kw.get("language")
+        return _fake_asr()
+
+    def boom_detect(wav, log, **kw):
+        raise AssertionError("detector must not run when language is forced")
+
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, transcribe=spy_transcribe, detect_language=boom_detect)
+    cfg.asr_language = "ru"
+    task = _task(path=tmp_path / "call.m4a")
+    task.path.write_bytes(b"x")
+
+    pipeline.run_all([task], RunOptions(mode="text"), jobs=1)
+
+    assert captured["language"] == "ru"
+
+
 def test_no_pretty_flag_skips_pretty_file(tmp_path):
     called = {"n": 0}
 
@@ -484,3 +746,85 @@ def test_no_pretty_flag_skips_pretty_file(tmp_path):
 
     assert called["n"] == 0
     assert not (tmp_path / "out" / "pretty").exists()
+
+
+# --- post-pass --diarize -------------------------------------------------
+
+def _seed_text_raw(tmp_path, cfg, manifest, *, name="call.m4a", content_hash="blake2b:post1"):
+    from transcriber.models import AsrInfo, ManifestEntry, Segment, StageState, Word, default_stages
+    from transcriber.pipeline import atomic_write_json, hash_hex, utcnow_iso
+
+    audio = tmp_path / name
+    audio.write_bytes(b"fake")
+    raw_path = Path(cfg.systems_folder) / "raw" / f"{hash_hex(content_hash)}.json"
+    doc = RawDoc(
+        schema=1, content_hash=content_hash, source_name=name, source_path=str(audio),
+        language="ru", duration_sec=3.0, num_speakers=0, is_monologue=True,
+        asr=AsrInfo("mlx", "large-v3", False), created_at="2026-01-01T00:00:00Z",
+        segments=[
+            Segment(0.0, 0.5, None, "hello", words=[Word(w="hello", start=0.0, end=0.5)]),
+            Segment(0.5, 1.0, None, "there", words=[Word(w="there", start=0.5, end=1.0)]),
+        ],
+        summary=None,
+    )
+    atomic_write_json(raw_path, doc.to_dict())
+    stages = default_stages()
+    stages["text"] = StageState(status="done", updated_at=utcnow_iso())
+    manifest.upsert(ManifestEntry(
+        content_hash=content_hash, source_name=name, status="done",
+        raw_path=str(raw_path), stages=stages, updated_at=utcnow_iso(),
+    ))
+    return FileTask(path=audio, content_hash=content_hash, source_name=name, status="to_do", reason="diarize pending")
+
+
+def test_diarize_pass_no_transcript_skips(tmp_path):
+    cfg, manifest, pipeline = _make_pipeline(tmp_path)
+    task = _task(path=tmp_path / "orphan.m4a", content_hash="blake2b:orphan")
+    task.path.write_bytes(b"x")
+
+    pipeline.run_diarize_pass([task], RunOptions(mode="diarize", want_diarize=True), jobs=1)
+
+    entry = manifest.get(task.content_hash)
+    assert entry.stages["diarize"].status == "skipped"
+    assert entry.stages["diarize"].reason == "no_transcript"
+
+
+def test_diarize_pass_merges_speakers_onto_existing_raw(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "transcriber.pipeline.mono_precheck.is_likely_monologue",
+        lambda *a, **k: False,
+    )
+    cfg, manifest, pipeline = _make_pipeline(tmp_path)
+    task = _seed_text_raw(tmp_path, cfg, manifest)
+
+    pipeline.run_diarize_pass([task], RunOptions(mode="diarize", want_diarize=True), jobs=1)
+
+    entry = manifest.get(task.content_hash)
+    assert entry.stages["diarize"].status == "done"
+    assert entry.stages["text"].status == "done"
+    doc = RawDoc.from_dict(json.loads(Path(entry.raw_path).read_text(encoding="utf-8")))
+    speakers = {seg.speaker for seg in doc.segments if seg.speaker}
+    assert speakers == {"SPEAKER_00", "SPEAKER_01"}
+    assert doc.num_speakers == 2
+
+
+def test_diarize_pass_mono_skips_full_pyannote(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "transcriber.pipeline.mono_precheck.is_likely_monologue",
+        lambda *a, **k: True,
+    )
+    calls = {"n": 0}
+
+    def counting(*a, **k):
+        calls["n"] += 1
+        return _fake_diar_mono()
+
+    cfg, manifest, pipeline = _make_pipeline(tmp_path, diarize=counting)
+    task = _seed_text_raw(tmp_path, cfg, manifest, content_hash="blake2b:mono")
+
+    pipeline.run_diarize_pass([task], RunOptions(mode="diarize", want_diarize=True), jobs=1)
+
+    entry = manifest.get(task.content_hash)
+    assert entry.stages["diarize"].status == "skipped"
+    assert entry.stages["diarize"].reason == "mono"
+    assert calls["n"] == 0

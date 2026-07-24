@@ -23,6 +23,7 @@ Sentence-count guidance for "summary" (a guideline, NOT a hard rule — the numb
 distinct substantive topics should drive the actual length, don't pad to fit): {sentences}.
 Extract one "topics" entry per distinct subject discussed, in chronological order.
 Do not limit the number of topics — a long recording with many subjects should have many topics. Do not pad with trivial or duplicate topics.
+This is an automatic transcription: nonsense, or the same word/phrase repeated many times in one place, is usually recognition noise rather than real speech — ignore it. Reason logically about the context: if a common word does not fit, it was probably misheard, so interpret what was most likely actually meant. Apply this ONLY to ordinary, everyday words; leave domain-specific or unusual terms alone even if they look wrong — do not try to guess them.
 {long_form_hint}
 """
 

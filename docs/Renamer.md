@@ -52,24 +52,3 @@ python -m transcriber.rename --propose
 # 3. apply — rename audio + .md (collision-safe) + pretty twin, rewrite in-doc
 #    Title / heading / Source file, sync manifest
 python -m transcriber.rename --apply
-```
-
-### Flags
-
-| Flag | Default | Meaning |
-|------|---------|---------|
-| `--folder` | `./out` | folder of generated `.md` docs |
-| `--plan` | `rename_plan.json` | plan file path |
-| `--audio-folder` | config `input_folder` | where the source audio lives |
-| `--no-manifest` | off | skip the `systems/manifest.json` sync |
-| `--batch-size` | `576` | files per LLM call (Excel-labelled A, B, … AA) |
-| `--model` | config `llm_model` | Ollama model |
-| `--pretty-subdir` | `pretty` | subfolder of the readable twins |
-| `--config` | — | explicit config path |
-
-## Model
-
-Ollama (`llm_model` from config, default `qwen2.5:14b`), same client as the
-summarize stage. Classify sees only filenames; propose additionally reads each
-doc's summary + topics — so the expensive context is sent only for the subset
-that actually needs renaming.

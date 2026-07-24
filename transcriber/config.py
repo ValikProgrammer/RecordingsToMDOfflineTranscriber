@@ -15,9 +15,10 @@ USER_CONFIG_PATH = Path.home() / ".config" / "transcriber" / "config.toml"
 _SIMPLE_KEYS = (
     "input_folder", "out_folder", "systems_folder", "logs_folder",
     "asr_model", "asr_backend", "asr_language", "asr_prompt_extra", "asr_prompt_file", "asr_artifact_denylist_extra",
+    "lang_detect_min_prob",
     "llm_model", "llm_ctx", "diarize_device",
     "mono_threshold", "min_speaker_share", "voiceprint_enabled", "voiceprint_threshold",
-    "jobs", "obsidian_frontmatter", "wikilink_speakers",
+    "jobs", "stage_a_lookahead", "obsidian_frontmatter", "wikilink_speakers",
     "progress_default_rtf",
 )
 
@@ -45,7 +46,8 @@ class Config:
     logs_folder: str = "./logs"
     asr_model: str = "large-v3"
     asr_backend: str = "mlx"  # mlx (Metal/GPU) | faster-whisper (CTranslate2/CPU, supports --beam)
-    asr_language: str = "ru"
+    asr_language: str = "ru"  # forced language; "" or "auto" = detect from sampled windows
+    lang_detect_min_prob: float = 0.6  # per-window confidence floor for auto language detection
     asr_prompt_extra: str = ""
     asr_prompt_file: str = ""  # path to a (git-ignored) glossary file, one term per line; merged into asr_prompt_extra
     asr_artifact_denylist_extra: list[str] = field(default_factory=list)
@@ -57,6 +59,7 @@ class Config:
     voiceprint_enabled: bool = True
     voiceprint_threshold: float = 0.7
     jobs: int = 3
+    stage_a_lookahead: int = 3  # max files stage A (ffmpeg+lang-detect) may run ahead of the GPU stage
     obsidian_frontmatter: bool = True
     wikilink_speakers: bool = False
     summary_tiers: list[SummaryTier] = field(default_factory=_default_tiers)

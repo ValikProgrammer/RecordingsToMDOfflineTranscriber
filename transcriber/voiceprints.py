@@ -72,6 +72,20 @@ class VoiceprintStore:
         return best_name if best_sim >= threshold else None
 
 
+def enroll_named_speakers(doc, store: VoiceprintStore) -> list[str]:
+    """Enroll every speaker in `doc` that already has both a name and an embedding.
+
+    Used to seed the voiceprint store from an already-labeled raw doc (e.g. one
+    produced by `--diarize --names`, or hand-corrected). Speakers without a name,
+    or without an embedding, are skipped. Returns the names enrolled."""
+    enrolled: list[str] = []
+    for sm in doc.speakers_meta:
+        if sm.name and sm.embedding:
+            store.enroll(sm.name, sm.embedding)
+            enrolled.append(sm.name)
+    return enrolled
+
+
 def identify_speakers(doc, store: VoiceprintStore, threshold: float = 0.7):
     """Fill in names for still-unnamed speakers by matching their embedding against
     the voiceprint store, then relabel segments + speakers_meta accordingly."""

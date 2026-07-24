@@ -1,5 +1,5 @@
 from transcriber.manifest import Manifest
-from transcriber.models import ManifestEntry
+from transcriber.models import ManifestEntry, set_stage
 from transcriber.stages.ingest import compute_blake2b, scan_and_hash, scan_audio_files
 
 
@@ -92,3 +92,133 @@ def test_failed_is_redone_with_retry_flag(tmp_path):
 
     tasks = scan_and_hash(tmp_path, manifest, retry_failed=True)
     assert tasks[0].status == "redo"
+
+
+def test_scan_skips_on_stage_done_not_root_done(tmp_path):
+    """text done, diarize pending, root status leftover 'done' -> diarize is runnable."""
+    path = tmp_path / "a.m4a"
+    path.write_bytes(b"data")
+    manifest = Manifest(tmp_path / "manifest.json")
+    content_hash = compute_blake2b(path)
+    entry = ManifestEntry(content_hash=content_hash, source_name="a.m4a", status="done")
+    set_stage(entry, "text", "done")
+    manifest.upsert(entry)
+
+    tasks = scan_and_hash(tmp_path, manifest, need_stage="diarize")
+    assert tasks[0].status in ("to_do", "redo")
+
+
+def test_scan_skips_diarize_when_stage_done(tmp_path):
+    path = tmp_path / "a.m4a"
+    path.write_bytes(b"data")
+    manifest = Manifest(tmp_path / "manifest.json")
+    content_hash = compute_blake2b(path)
+    entry = ManifestEntry(content_hash=content_hash, source_name="a.m4a", status="done")
+    set_stage(entry, "text", "done")
+    set_stage(entry, "diarize", "done")
+    manifest.upsert(entry)
+
+    tasks = scan_and_hash(tmp_path, manifest, need_stage="diarize")
+    assert tasks[0].status == "skip"
+
+
+def test_scan_skips_diarize_when_stage_skipped(tmp_path):
+    path = tmp_path / "a.m4a"
+    path.write_bytes(b"data")
+    manifest = Manifest(tmp_path / "manifest.json")
+    content_hash = compute_blake2b(path)
+    entry = ManifestEntry(content_hash=content_hash, source_name="a.m4a", status="done")
+    set_stage(entry, "text", "done")
+    set_stage(entry, "diarize", "skipped", reason="mono")
+    manifest.upsert(entry)
+
+    tasks = scan_and_hash(tmp_path, manifest, need_stage="diarize")
+    assert tasks[0].status == "skip"
+
+
+def test_scan_text_stage_done_skips_even_if_root_status_done(tmp_path):
+    path = tmp_path / "a.m4a"
+    path.write_bytes(b"data")
+    manifest = Manifest(tmp_path / "manifest.json")
+    content_hash = compute_blake2b(path)
+    entry = ManifestEntry(content_hash=content_hash, source_name="a.m4a", status="done")
+    set_stage(entry, "text", "done")
+    manifest.upsert(entry)
+
+    tasks = scan_and_hash(tmp_path, manifest, need_stage="text")
+    assert tasks[0].status == "skip"
+    assert tasks[0].reason == "text already done"
+
+
+def test_scan_new_entry_with_need_stage_is_to_do(tmp_path):
+    (tmp_path / "a.m4a").write_bytes(b"data")
+    manifest = Manifest(tmp_path / "manifest.json")
+    tasks = scan_and_hash(tmp_path, manifest, need_stage="text")
+    assert tasks[0].status == "to_do"
+
+
+def test_scan_force_redoes_done_stage(tmp_path):
+    path = tmp_path / "a.m4a"
+    path.write_bytes(b"data")
+    manifest = Manifest(tmp_path / "manifest.json")
+    content_hash = compute_blake2b(path)
+    entry = ManifestEntry(content_hash=content_hash, source_name="a.m4a", status="done")
+    set_stage(entry, "text", "done")
+    manifest.upsert(entry)
+
+    tasks = scan_and_hash(tmp_path, manifest, need_stage="text", force=True)
+    assert tasks[0].status in ("to_do", "redo")
+    assert tasks[0].status != "skip"
+
+
+def test_scan_failed_root_skips_regardless_of_need_stage_without_retry(tmp_path):
+    path = tmp_path / "a.m4a"
+    path.write_bytes(b"data")
+    manifest = Manifest(tmp_path / "manifest.json")
+    content_hash = compute_blake2b(path)
+    manifest.upsert(
+        ManifestEntry(content_hash=content_hash, source_name="a.m4a", status="failed", error="boom")
+    )
+
+    tasks = scan_and_hash(tmp_path, manifest, need_stage="text")
+    assert tasks[0].status == "skip"
+
+
+def test_scan_failed_root_redoes_with_need_stage_and_retry_flag(tmp_path):
+    path = tmp_path / "a.m4a"
+    path.write_bytes(b"data")
+    manifest = Manifest(tmp_path / "manifest.json")
+    content_hash = compute_blake2b(path)
+    manifest.upsert(
+        ManifestEntry(content_hash=content_hash, source_name="a.m4a", status="failed", error="boom")
+    )
+
+    tasks = scan_and_hash(tmp_path, manifest, need_stage="text", retry_failed=True)
+    assert tasks[0].status == "redo"
+
+
+def test_scan_in_progress_root_redoes_with_need_stage(tmp_path):
+    path = tmp_path / "a.m4a"
+    path.write_bytes(b"data")
+    manifest = Manifest(tmp_path / "manifest.json")
+    content_hash = compute_blake2b(path)
+    manifest.upsert(
+        ManifestEntry(content_hash=content_hash, source_name="a.m4a", status="in_progress")
+    )
+
+    tasks = scan_and_hash(tmp_path, manifest, need_stage="text")
+    assert tasks[0].status == "redo"
+
+
+def test_scan_diarize_runnable_even_if_text_done(tmp_path):
+    """post-pass diarize still needs the file path even though text is already done."""
+    path = tmp_path / "a.m4a"
+    path.write_bytes(b"data")
+    manifest = Manifest(tmp_path / "manifest.json")
+    content_hash = compute_blake2b(path)
+    entry = ManifestEntry(content_hash=content_hash, source_name="a.m4a", status="done")
+    set_stage(entry, "text", "done")
+    manifest.upsert(entry)
+
+    tasks = scan_and_hash(tmp_path, manifest, need_stage="diarize")
+    assert tasks[0].status in ("to_do", "redo")

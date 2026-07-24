@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Optional
 
 
@@ -218,6 +219,20 @@ class DiarResult:
     total_speech_sec: dict[str, float] = field(default_factory=dict)
 
 
+STAGE_NAMES = ("text", "diarize", "summary", "pretty")
+
+
+@dataclass
+class StageState:
+    status: str  # "pending" | "in_progress" | "done" | "skipped" | "failed"
+    updated_at: str = ""
+    reason: Optional[str] = None
+
+
+def default_stages() -> dict[str, StageState]:
+    return {name: StageState(status="pending") for name in STAGE_NAMES}
+
+
 @dataclass
 class FileTask:
     path: object  # pathlib.Path; kept loosely typed to avoid an import cycle
@@ -242,3 +257,14 @@ class ManifestEntry:
     elapsed_sec: Optional[float] = None
     error: Optional[str] = None
     updated_at: str = ""
+    stages: dict[str, StageState] = field(default_factory=default_stages)
+
+
+def stage_status(entry: ManifestEntry, name: str) -> str:
+    return entry.stages[name].status
+
+
+def set_stage(entry: ManifestEntry, name: str, status: str, reason: Optional[str] = None) -> ManifestEntry:
+    updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    entry.stages[name] = StageState(status=status, updated_at=updated_at, reason=reason)
+    return entry

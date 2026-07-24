@@ -1,6 +1,8 @@
 """Entry point: python -m transcriber (§6, §16 milestones 1 & 10)."""
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -10,7 +12,14 @@ from .cli import apply_overrides, build_run_options, parse_args, resolve_mode
 from .config import Config, load_config
 from .logging_setup import setup_run_logger
 from .manifest import Manifest
-from .pipeline import Pipeline, filter_tasks, list_raw_files
+from .pipeline import (
+    Pipeline,
+    filter_tasks,
+    filter_need_stage,
+    list_raw_files,
+    load_raw_doc,
+    resolve_raw_by_query,
+)
 from .progress import make_reporter
 from .stages.audio import FfmpegNotFoundError, check_ffmpeg_available, normalize, probe_duration
 from .stages.ingest import scan_and_hash
@@ -74,7 +83,15 @@ def cmd_warmup(cfg: Config, log) -> int:
 
 def cmd_dry_run(cfg: Config, args) -> int:
     manifest = Manifest(Path(cfg.systems_folder) / "manifest.json")
-    tasks = scan_and_hash(Path(cfg.input_folder), manifest, retry_failed=args.retry_failed)
+    mode = resolve_mode(args)
+    need_stage = "diarize" if mode == "diarize" else "text"
+    tasks = scan_and_hash(
+        Path(cfg.input_folder),
+        manifest,
+        retry_failed=args.retry_failed,
+        need_stage=need_stage,
+        force=args.force,
+    )
     if not tasks:
         print(f"No supported audio files found in {cfg.input_folder}.")
         return 0
@@ -105,6 +122,24 @@ def _select_transcribe(cfg: Config, args):
     return asr_mlx.transcribe, "ASR backend: mlx (Metal/GPU)"
 
 
+def _install_drain_handlers(pipeline, log) -> None:
+    """1st SIGINT/SIGTERM → graceful drain (finish in-flight, no new files); 2nd → force-quit."""
+    def _handler(signum, frame):  # noqa: ARG001 - signal handler signature
+        if pipeline.request_drain():
+            print(
+                "\n[stopping] finishing in-flight files, taking no new ones — "
+                "press Ctrl-C again to force-quit.",
+                flush=True,
+            )
+            log.info(f"signal {signum}: graceful drain requested")
+        else:
+            print("\n[force-quit]", flush=True)
+            os._exit(130)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, _handler)
+
+
 def cmd_run(cfg: Config, args, log) -> int:
     manifest = Manifest(Path(cfg.systems_folder) / "manifest.json")
     mode = resolve_mode(args)
@@ -115,19 +150,38 @@ def cmd_run(cfg: Config, args, log) -> int:
     pipeline = Pipeline(cfg, manifest, transcribe=transcribe, reporter=reporter, console_logs=True)
 
     try:
-        if mode in ("full", "text"):
-            tasks = scan_and_hash(Path(cfg.input_folder), manifest, retry_failed=args.retry_failed)
+        if mode in ("full", "text", "diarize"):
+            need_stage = "diarize" if mode == "diarize" else "text"
+            tasks = scan_and_hash(
+                Path(cfg.input_folder),
+                manifest,
+                retry_failed=args.retry_failed,
+                need_stage=need_stage,
+                force=args.force,
+            )
             tasks = filter_tasks(tasks, opts.only, opts.skip)
             log.info(f"{len(tasks)} files to process (mode={mode})")
             total_audio = probe_total_audio(tasks, log)
             reporter.start_batch(total_audio, len(tasks))
             if tasks:
                 log.info("preparing models (first run may download several GB)…")
-            pipeline.run_all(tasks, opts, jobs=cfg.jobs)
+            _install_drain_handlers(pipeline, log)  # Ctrl-C = graceful drain (run_all honors it)
+            if mode == "diarize":
+                pipeline.run_diarize_pass(tasks, opts, jobs=cfg.jobs)
+            else:
+                pipeline.run_all(tasks, opts, jobs=cfg.jobs)
         else:  # summary | resummarize | rerender
             raw_paths = list_raw_files(Path(cfg.systems_folder))
             if opts.only:
                 raw_paths = [p for p in raw_paths if opts.only in p.stem]
+            if mode == "summary" and not opts.force:
+                before = len(raw_paths)
+                raw_paths = filter_need_stage(manifest, raw_paths, "summary", force=False)
+                skipped = before - len(raw_paths)
+                if skipped:
+                    log.info(f"skipping {skipped} already-summarized (use --force to redo)")
+            elif mode == "summary" and opts.force:
+                raw_paths = filter_need_stage(manifest, raw_paths, "summary", force=True)
             log.info(f"{len(raw_paths)} raw files to process (mode={mode})")
             total_audio = sum(_raw_duration(p) for p in raw_paths)
             reporter.start_batch(total_audio, len(raw_paths))
@@ -173,6 +227,34 @@ def cmd_enroll(cfg: Config, args, log) -> int:
     return 0 if enrolled else 1
 
 
+def cmd_enroll_from_raw(cfg: Config, args, log) -> int:
+    """Enroll named speakers' voiceprints from an already-labeled raw JSON doc.
+
+    Unlike --enroll (one recording, dominant speaker, needs audio), this reads the
+    embeddings already stored in a raw doc's speakers_meta — so one labeled
+    multi-speaker dialog seeds several names at once, no audio or pyannote needed."""
+    from .voiceprints import VoiceprintStore, enroll_named_speakers
+
+    raw_paths = resolve_raw_by_query(Path(cfg.systems_folder), args.enroll_raw)
+    if not raw_paths:
+        print(f"No raw doc matched {args.enroll_raw!r} under {cfg.systems_folder}/raw.")
+        return 1
+
+    store = VoiceprintStore(Path(cfg.systems_folder) / "voiceprints")
+    total = 0
+    for raw_path in raw_paths:
+        doc = load_raw_doc(raw_path)
+        enrolled = enroll_named_speakers(doc, store)
+        for name in enrolled:
+            print(f"enrolled {name} from {doc.source_name}")
+        if not enrolled:
+            print(f"skip {doc.source_name}: no named speakers with embeddings")
+        total += len(enrolled)
+
+    print(f"Enrolled {total} speaker sample(s) from {len(raw_paths)} raw doc(s).")
+    return 0 if total else 1
+
+
 def _silence_hf_download_bars() -> None:
     """Kill HuggingFace-hub's own tqdm download/reconstruct bars — noise here, and
     they collide with our progress bars (they even show 0.00B when models are
@@ -206,6 +288,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_warmup(cfg, log)
     if args.enroll:
         return cmd_enroll(cfg, args, log)
+    if args.enroll_raw:
+        return cmd_enroll_from_raw(cfg, args, log)
     if args.dry_run:
         return cmd_dry_run(cfg, args)
     return cmd_run(cfg, args, log)

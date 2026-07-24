@@ -28,6 +28,39 @@ def test_resolve_mode_priority_summary_resummarize_rerender():
     assert resolve_mode(parse_args(["--rerender"])) == "rerender"
 
 
+def test_resolve_mode_diarize():
+    assert resolve_mode(parse_args(["--diarize"])) == "diarize"
+
+
+def test_diarize_alone_is_postpass_mode():
+    assert resolve_mode(parse_args(["--diarize"])) == "diarize"
+
+
+def test_text_plus_diarize_sets_want_diarize():
+    args = parse_args(["--text", "--diarize"])
+    assert resolve_mode(args) == "text"
+    opts = build_run_options(args, "text")
+    assert opts.want_diarize is True
+
+
+def test_text_alone_leaves_want_diarize_false():
+    args = parse_args(["--text"])
+    assert resolve_mode(args) == "text"
+    opts = build_run_options(args, "text")
+    assert opts.want_diarize is False
+
+
+def test_full_wants_diarize():
+    opts = build_run_options(parse_args([]), "full")
+    assert opts.want_diarize is True
+
+
+def test_diarize_mode_wants_diarize():
+    args = parse_args(["--diarize"])
+    opts = build_run_options(args, "diarize")
+    assert opts.want_diarize is True
+
+
 def test_parse_names_splits_and_trims():
     assert parse_names("Alex, Jamie") == ["Alex", "Jamie"]
     assert parse_names(None) is None
@@ -38,12 +71,14 @@ def test_apply_overrides_sets_config_fields():
     cfg = Config()
     args = parse_args([
         "--input-folder", "./a", "--out", "./b", "--llm-model", "custom:model",
+        "--llm-ctx", "40000",
         "--jobs", "5", "--diarize-device", "cpu", "--no-frontmatter", "--wikilink-speakers",
     ])
     cfg = apply_overrides(cfg, args)
     assert cfg.input_folder == "./a"
     assert cfg.out_folder == "./b"
     assert cfg.llm_model == "custom:model"
+    assert cfg.llm_ctx == 40000
     assert cfg.jobs == 5
     assert cfg.diarize_device == "cpu"
     assert cfg.obsidian_frontmatter is False
@@ -135,6 +170,15 @@ def test_enroll_flag_parsed():
 
     assert parse_args(["--enroll", "Галя"]).enroll == "Галя"
     assert parse_args([]).enroll is None
+
+
+def test_force_flag_parsed_and_mapped_to_run_option():
+    from transcriber.cli import build_run_options, parse_args
+
+    assert parse_args(["--summary", "--force"]).force is True
+    assert parse_args(["--summary"]).force is False
+    assert build_run_options(parse_args(["--summary", "--force"]), "summary").force is True
+    assert build_run_options(parse_args(["--summary"]), "summary").force is False
 
 
 def test_pretty_flag_sets_run_option():
