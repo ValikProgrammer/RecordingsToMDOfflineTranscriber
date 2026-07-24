@@ -229,6 +229,69 @@ def test_fill_proposals_prefers_frontmatter_date_over_filename(monkeypatch, tmp_
     assert plan["files"][0]["new_name"] == "2026-07-20 — Настоящее имя.md"
 
 
+# --- date resolution prefers the audio file over a poisoned frontmatter Date ---
+
+_POISONED_DOC = """---
+Title: "Sep 24, 11 20"
+Date: 2026-07-20
+Language: RU
+Source file: "Sep 24, 11.20.m4a"
+---
+
+# Sep 24, 11 20
+
+### Summary
+Тестовое саммари.
+"""
+
+
+def test_resolve_date_prefers_audio_file_over_poisoned_frontmatter(tmp_path):
+    # frontmatter Date (2026-07-20) is the very bug being fixed -- it's the
+    # processing date the .md happened to be generated on, not the recording
+    # date. When the source audio is available, its own name/metadata/fs
+    # signals (oldest-of-all, per naming.resolve_date) are more trustworthy.
+    audio_dir = tmp_path / "audio"
+    audio_dir.mkdir()
+    (audio_dir / "Sep 24, 11.20.m4a").write_bytes(b"x")
+    day = rename.resolve_date(
+        "2026-07-20 — Sep 24.md", tmp_path, _POISONED_DOC, audio_folder=audio_dir
+    )
+    from datetime import date
+
+    assert day == date(2025, 9, 24)
+
+
+def test_resolve_date_falls_back_when_audio_missing(tmp_path):
+    from datetime import date
+
+    day = rename.resolve_date(
+        "2026-05-01 — junk.md", tmp_path, _DOC, audio_folder=tmp_path / "audio"
+    )
+    assert day == date(2026, 7, 20)  # falls back to frontmatter Date from _DOC
+
+
+def test_resolve_date_without_audio_folder_uses_old_priority(tmp_path):
+    from datetime import date
+
+    day = rename.resolve_date("2026-05-01 — junk.md", tmp_path, _DOC)
+    assert day == date(2026, 7, 20)
+
+
+def test_fill_proposals_passes_audio_folder_to_resolve_date(monkeypatch, tmp_path):
+    folder = tmp_path / "out"
+    audio_dir = tmp_path / "audio"
+    audio_dir.mkdir()
+    (audio_dir / "Sep 24, 11.20.m4a").write_bytes(b"x")
+    _write(folder / "2026-07-20 — Sep 24.md", _POISONED_DOC)
+    _install_fake_ollama(monkeypatch, [json.dumps({"A": "Истфак"})])
+    plan = {
+        "folder": str(folder),
+        "files": [{"file": "2026-07-20 — Sep 24.md", "action": "rename", "reason": "x"}],
+    }
+    rename.fill_proposals(plan, folder, "m", LOG, batch_size=576, audio_folder=audio_dir)
+    assert plan["files"][0]["new_name"] == "2025-09-24 — Истфак.md"
+
+
 # --- source audio ------------------------------------------------------------
 
 def test_parse_source_file():

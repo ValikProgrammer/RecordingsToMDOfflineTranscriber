@@ -183,10 +183,23 @@ def parse_frontmatter_date(text: str) -> date | None:
         return None
 
 
-def resolve_date(name: str, folder: Path, text: str | None) -> date | None:
-    """Date for the renamed file, algorithmically (never from the LLM):
-    frontmatter `Date:` (from Obsidian) -> date in the current filename -> file mtime.
+def resolve_date(
+    name: str, folder: Path, text: str | None, audio_folder: Path | None = None
+) -> date | None:
+    """Date for the renamed file, algorithmically (never from the LLM).
+
+    When the source audio is available, its own signals (name / container
+    creation_time / filesystem times, oldest-of-all via naming.resolve_date) are
+    used — the frontmatter `Date:` can itself be wrong (e.g. it was generated
+    from a copy-date bug), so it is not trusted over the audio when we have it.
+    Otherwise: frontmatter `Date:` -> date in the current filename -> file mtime.
     """
+    if text and audio_folder is not None:
+        source_file = parse_source_file(text)
+        if source_file:
+            audio_path = Path(audio_folder) / source_file
+            if audio_path.exists():
+                return naming.resolve_date(Path(source_file).stem, audio_path)
     if text:
         day = parse_frontmatter_date(text)
         if day is not None:
@@ -213,7 +226,8 @@ def _audio_name_for(new_md_name: str, source_file: str) -> str:
 
 
 def fill_proposals(
-    plan: dict, folder: Path, model: str, log: logging.Logger, batch_size: int
+    plan: dict, folder: Path, model: str, log: logging.Logger, batch_size: int,
+    audio_folder: Path | None = None,
 ) -> dict:
     to_rename = [e for e in plan["files"] if e.get("action") == "rename"]
     entries = []
@@ -225,7 +239,7 @@ def fill_proposals(
             summary, topics = parse_summary_and_topics(text)
         entries.append(
             {"name": e["file"], "summary": summary, "topics": topics,
-             "day": resolve_date(e["file"], folder, text),
+             "day": resolve_date(e["file"], folder, text, audio_folder),
              "source_file": parse_source_file(text) if text else None}
         )
 
@@ -374,6 +388,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="source audio folder (defaults to config input_folder)")
     parser.add_argument("--no-manifest", dest="no_manifest", action="store_true",
                         help="do not update systems/manifest.json on --apply")
+    parser.add_argument("--manifest", dest="manifest_path", default=None,
+                        help="path to manifest.json to sync on --apply "
+                             "(defaults to config systems_folder/manifest.json)")
     parser.add_argument("--batch-size", dest="batch_size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--model", default=None, help="Ollama model (defaults to config llm_model)")
     parser.add_argument("--config", default=None)
@@ -389,6 +406,7 @@ def main(argv: list[str] | None = None) -> int:
     plan_path = Path(args.plan)
     cfg = load_config(args.config)
     model = args.model or cfg.llm_model
+    audio_folder = Path(args.audio_folder or cfg.input_folder)
 
     if args.classify:
         plan = build_classify_plan(folder, model, log, args.batch_size)
@@ -403,7 +421,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Plan not found: {plan_path}. Run --classify first.")
             return 1
         plan = json.loads(plan_path.read_text(encoding="utf-8"))
-        fill_proposals(plan, folder, model, log, args.batch_size)
+        fill_proposals(plan, folder, model, log, args.batch_size, audio_folder)
         plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
         n = sum(1 for f in plan["files"] if f.get("new_name"))
         print(f"Updated {plan_path} — {n} proposed name(s).")
@@ -415,8 +433,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Plan not found: {plan_path}. Run --classify then --propose first.")
         return 1
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    audio_folder = Path(args.audio_folder or cfg.input_folder)
-    manifest_path = None if args.no_manifest else Path(cfg.systems_folder) / "manifest.json"
+    manifest_path = None
+    if not args.no_manifest:
+        manifest_path = Path(args.manifest_path) if args.manifest_path else Path(cfg.systems_folder) / "manifest.json"
     applied = apply_plan(plan, folder, args.pretty_subdir, audio_folder, manifest_path)
     print(f"Applied {applied} rename(s) in {folder}")
     return 0
